@@ -1,0 +1,9 @@
+# This repo is authored on Windows and runs on Linux. A shell script that reaches the host
+# with CRLF endings fails as `#!/bin/bash^M: bad interpreter`, which reads as a missing
+# shell rather than a line-ending problem.
+#
+# Pinned repo-wide rather than per-extension. The first version of this file covered *.sh
+# and Dockerfile only, on the reasoning that those are what Linux executes — and the deploy
+# then shipped CRLF into every .js on the host anyway. Nothing broke, because node does not
+# care, which is exactly why it would have gone unnoticed until the next file that did.
+* text=auto eol=lf

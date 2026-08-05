@@ -1,0 +1,32 @@
+{
+  "name": "actual-mail",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bank transaction-alert emails -> Actual Budget",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "scan": "node scripts/scan-pii.js"
+  },
+  "keywords": [
+    "actual-budget",
+    "imap",
+    "banking",
+    "personal-finance",
+    "email"
+  ],
+  "bin": {
+    "actual-mail": "bin/actual-mail.js",
+    "actual-mail-load": "bin/actual-mail-load.js"
+  },
+  "dependencies": {
+    "@actual-app/api": "26.7.0",
+    "html-to-text": "^10.0.0",
+    "imapflow": "^1.6.1",
+    "mailparser": "^3.9.14"
+  }
+}

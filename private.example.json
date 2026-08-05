@@ -1,0 +1,7 @@
+{
+  "literals": [
+    { "pattern": "Your Name", "flags": "gi", "replacement": "testuser" },
+    { "pattern": "you@yourmail\\.com", "flags": "gi", "replacement": "testuser@example.com" },
+    { "pattern": "Rainy Day Pot", "flags": "g", "replacement": "TEST POT" }
+  ]
+}

@@ -1,0 +1,46 @@
+node_modules/
+.env
+*.local
+harvest-out/
+.actual-cache/
+# verify-scratch.js deletes this on entry and in `finally`, but a hard kill leaves a local
+# budget built from the user's real rows sitting at the repo root, one `git add -A` from
+# being committed. Cheaper to ignore it than to rely on the cleanup.
+.scratch-cache/
+# ACTUAL_MAIL_MAPPING lets the operator point at any filename, and that file holds every
+# account's last four digits and every pot name. Pinned to the exact name `mapping.json`, a
+# deploy directory that called it `accounts.json` was not ignored by anything here. Widened to
+# every spelling that carries the word, plus the two names people actually reach for. It still
+# cannot cover a name nobody predicted: if you rename it to something else, add it here in the
+# same commit. scan-pii.js's `account key` rule is the backstop, and it only sees tracked files.
+mapping.json
+*mapping*.json
+!mapping.example.json
+accounts.json
+work-*
+
+# SDD scratch — ledgers, briefs, review packages, the PII baseline
+.superpowers/
+
+config.env
+runs/
+private.local.json
+
+# run.sh writes the Actual data dir here, not to .actual-cache/ — a full copy of the budget, in a
+# directory the deploy instructions say to put the scripts in, in a clone. `git add -A` there
+# committed it, and scan-pii.js reads tracked files only so the gate could not warn first.
+cache/
+# Backups inherit neither the original's mode nor its privacy. A bare `.env` line matches only
+# that exact name, and an `.env.bak-*` at 0644 on an exported share has happened here before.
+.env*
+!.env.example
+*.bak
+*.bak-*
+# The README's own Quickstart writes this into the repo root.
+transactions.csv
+# Archives and runner state, wherever the scripts are copied to.
+*.jsonl
+.lock
+.last-alert-*
+.fail-window-*
+.last-complete

@@ -1,0 +1,72 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      # Both versions always report: a failure on one is a fact about that version, not a
+      # reason to hide the other.
+      fail-fast: false
+      matrix:
+        # 20 is the floor package.json advertises, 22 is what the Dockerfile actually ships.
+        # Every run during development was v24, so those two are exactly the claims that have
+        # never been tested. 24 is not listed: it is the version the maintainer already runs
+        # locally before pushing.
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The `--all-revs` gate below reads every blob and every commit message, so it needs
+          # the full history rather than the default shallow clone.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      # `node --test` globs **/*.test.js from the root, so this one command covers test/ and
+      # test/load/ together, not two suites.
+      - run: npm test
+
+      # Called directly rather than through `npm run scan`, so the gate cannot be disarmed by
+      # editing a package.json script. It exits 1 on any finding and there is deliberately no
+      # `continue-on-error`: this repo ships redacted fixtures of real bank mail, and a gate
+      # contributors learn to override has stopped being a gate.
+      - name: PII scan (working tree)
+        run: node scripts/scan-pii.js
+
+      # Runs with 0 literal rules — private.local.json is gitignored and no runner has one — so
+      # this proves the history is STRUCTURALLY clean, which is the half that protects a
+      # contributor. The maintainer's own literals are exercised locally, and the rewrite that
+      # made this step passable was verified there with all 5 applied.
+      - name: PII scan (all revisions)
+        run: node scripts/scan-pii.js --all-revs
+
+      # run.sh needs flock, which Git Bash on the maintainer's Windows host does not ship, so
+      # ubuntu-latest is the only place these checks run at all.
+      - name: run.sh shell checks
+        run: bash scripts/test-run-sh.sh
+
+  # The image was never built during development — no docker daemon on the maintainer's host —
+  # so `npm ci --omit=dev` resolving this lock inside node:22-alpine is untested, and
+  # @actual-app/api carries platform-specific binaries. This job is the only thing that checks
+  # the artefact people are told to deploy.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t actual-mail .
+      # Cheapest proof the image starts: --help prints usage and exits 0 on both entrypoints,
+      # which also means the src/ and bin/ COPY layout resolves inside the container. The loader
+      # gained a real --help in 2026-08; before that this step passed because `docker run` without
+      # -i hands it an empty stdin, so it proved the layout and not the flag it named.
+      - run: docker run --rm actual-mail --help
+      - run: docker run --rm --entrypoint node actual-mail /app/bin/actual-mail-load.js --help

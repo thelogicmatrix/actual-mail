@@ -1,0 +1,153 @@
+# actual-mail — Decisions
+
+Each entry records a major design choice, why it was made, what alternatives were rejected, and
+whether it is still active or superseded.
+
+Back-filled 2026-07-29 when the docs layout was stamped, from the README, the git history and
+the design record. Dates are the decision's own date where the history places it, not the
+back-fill date.
+
+### 2026-07-28 · Parse alert emails rather than sync or script a login · owner: Nathan
+- Decision: extract from bank transaction-alert emails, plus the Wise API where a real one exists.
+- Why: it is the only channel banks push without authentication, and the coverage gap was verified rather than assumed.
+- Alternatives rejected: every Actual sync provider (Akahu, Enable Banking, GoCardless, SimpleFIN, Pluggy — no APAC); Synci and Salt Edge (zero SG banks despite the institution counts); Lunch Flow (rides the same providers, same gap); SGFinDex (licensed FIs only, and serves balances not a transaction feed); scripting a bank login (all three local banks require a digital-token approval per session, and defeating your own 2FA is not a foundation for a published tool).
+- Status: active
+
+### 2026-07-28 · Deterministic extraction, never an LLM in the path · owner: Nathan
+- Decision: no model reads a number anywhere in the extraction path.
+- Why: the method being replaced was an LLM reading a screenshot, which fails plausibly. A confident wrong digit with no signal attached is worse than a loud failure.
+- Alternatives rejected: LLM extraction with a confidence score (a plausible number with a plausible score is the same failure); LLM as a fallback for unparsed mail (would convert the loud failure into a quiet one, defeating the invariant).
+- Status: active
+
+### 2026-07-28 · Two packages, and Part 1 never converts currency · owner: Claude
+- Decision: extraction emits the foreign amount honestly; conversion happens only in the loader.
+- Why: an FX bug then cannot contaminate the extraction record, and Part 1 stays useful to YNAB, Firefly III, Beancount or a spreadsheet.
+- Alternatives rejected: one package converting on the way out (couples the record to a rate source and to Actual).
+- Status: **packaging half superseded 2026-08-03** by "One package, two bins". The no-conversion-in-Part-1 rule is untouched and still active.
+
+### 2026-07-28 · The unparsed invariant · owner: Claude
+- Decision: every message parses, matches the ignore-list, or fails the run with a non-zero exit. Parsed rows are still written first.
+- Why: converts the motivating class of error (quiet wrongness) into a loud one. A bank redesigning its emails surfaces on the next run.
+- Alternatives rejected: skip-and-log (indistinguishable from a clean run in cron, where stderr is discarded); fail the whole batch (one bad email would discard good rows).
+- Status: active
+
+### 2026-07-28 · Design against real mail, not against reasoning · owner: Claude
+- Decision: harvest the whole mailbox and build parsers from what is actually there.
+- Why: it found 11 transaction formats where the first draft assumed 4; three word orders for card spends, where building on one missed 28 of 43 overseas messages; that "overseas" and "foreign currency" are different things (28 of those 43 are already billed in SGD); and that quoted-printable must be decoded before any regex touches the body. Cancellations and refunds turned out mandatory, since omitting them permanently over-counts spending.
+- Alternatives rejected: building from a handful of sample emails (would have shipped a parser that passed its own tests and missed most real mail).
+- Status: active
+
+### 2026-07-28 · Reconciliation stays a human action · owner: Nathan
+- Decision: `ACTUAL_MAIL_RECONCILED_THROUGH` is required for a real import and skips rows on or before it.
+- Why: without it a run backfills history already balanced by hand, and since hand-entered rows carry no `imported_id`, nothing else would stop the duplicates.
+- Alternatives rejected: auto-detecting the last reconciled date from Actual (guesses at a human judgement); importing everything and letting dedup sort it out (dedup cannot see hand-entered rows).
+- Status: active
+
+### 2026-07-28 · Do not trust Actual's own importer · owner: Claude
+- Decision: replaced `importTransactions` with `addTransactions` plus our own `imported_id` dedup on the deterministic row id.
+- Why: Actual's importer fuzzy-matches an incoming row against existing ones by amount and payee and silently drops it. It swallowed two genuine spends against same-amount manual entries days earlier while still reporting success. What we skip, we count out loud.
+- Alternatives rejected: keeping `importTransactions` and reconciling the difference afterwards (the drop is silent, so there is nothing to reconcile against).
+- Status: active
+
+### 2026-07-29 · Two cadences, and the caller names which · owner: Claude
+- Decision: 05:30 sweep (7-day window) plus hourly top-up 06:15-23:15 (1-day window, alerts only on a fault the previous run did not report). The cadence is passed in, never derived from `date +%H`.
+- Why: the host and the container need not agree about the local hour. Going hourly also broke three things that were fine daily: archive truncation per run, alert amplification (~168 pings for one unparsed email), and two runs as two writers on one Actual data dir.
+- Alternatives rejected: hourly only (loses the wide re-covering window); reading the hour inside the script (couples correctness to container timezone).
+- Status: **the "always alerts" half superseded 2026-08-05** by "A source outage waits before it alerts", below — the sweep is a reporting window like any other, not an exemption from the gate. The two-cadence split and the caller-names-it rule are untouched and still active.
+
+### 2026-07-29 · Build the webhook payload with `json.dumps`, and check the status · owner: Claude
+- Decision: `python3` builds the JSON; the HTTP status is checked; a rejected alert is written to `run.log`.
+- Why: the payload had been assembled by `printf` and hand-escaped with `tr -d`, which leaves newlines, and a raw newline is not legal inside a JSON string. Every real error body is multi-line, so Discord answered 400 and `curl -s` swallowed it. **The failure alert had never worked, for the entire life of the project.**
+- Alternatives rejected: more careful hand-escaping (the same class of bug, one layer down); trusting `curl -s` (it is what hid this).
+- Status: active
+
+### 2026-07-29 · One alert memory slot per channel, fingerprint over the fault only · owner: Claude
+- Decision: separate slots for `extract`, `load` and `start`; counting lines stripped before hashing.
+- Why: one slot meant two call sites overwrote each other, so a standing double failure sent two messages an hour, worse than no budget at all. And the fingerprint hashed a body containing `N row(s)`, which changes whenever a transaction lands, so dedup collapsed exactly when the feed was busy.
+- Alternatives rejected: one slot with a longer suppression window (does not fix two writers); hashing the whole body (the counting-line problem).
+- Status: active
+
+### 2026-07-29 · Fixed +08 date arithmetic via `sgDay()` · owner: Claude
+- Decision: compute the Singapore day explicitly rather than slicing the timestamp string.
+- Why: Trust carries an SGT offset and Wise answers UTC, so `slice(0,10)` took the day off whichever arrived. Every Wise movement between midnight and 08:00 SGT booked a day early, and across a month end into a closed month. The same slice drove the reconciliation floor, so a shifted row could drop for good as `skipped`.
+- Alternatives rejected: `Intl`/ICU timezone conversion (adds a runtime dependency for a fixed offset that never observes DST).
+- Status: active
+
+### 2026-07-29 · The watchdog shares no code with the driver · owner: Claude
+- Decision: `scripts/watchdog.sh` is a separate script on its own cron entry, alerting when the feed has not completed a run in 90 minutes.
+- Why: everything in `run.sh` reports its own failures, which cannot cover the failure where the job does not run at all. The alerting lives inside the job that stopped, so noticing that has to be a different job.
+- Alternatives rejected: a self-check inside `run.sh` (cannot fire if `run.sh` never starts); a cron-monitoring service (the irreducible gap is the shared `config.env`, which an off-host checker would close instead — recorded as an idea, not built).
+- Status: **the `run.log` trigger superseded 2026-08-05** by the `runs/.last-complete` sentinel, which only a finished run writes. A run that bailed out early still appends to `run.log`, so log freshness was never evidence the feed ran. The separate-script decision is untouched and still active.
+
+### 2026-07-29 · Imported rows carry no `source:type` note · owner: Nathan
+- Decision: dropped the note tag from imported rows; the 4 existing ones were cleared. FX rows keep theirs.
+- Why: it restated what the account and payee already showed, and occupied the one field Nathan writes his own notes in. The FX note is different: it warns the amount is an estimate to verify at settlement, which is information rather than a label.
+- Status: active
+
+### 2026-07-29 · `.env.bak-*` permissions fixed, rotation declined · owner: Nathan
+- Decision: chmod 0600. Credential rotation was offered and declined.
+- Why: the backup sat at 0644 on an SMB-exported share from 28 Jul. Nathan's call on the residual risk.
+- Status: active
+
+### 2026-07-29 · Retry the transport, never the status code · owner: Claude
+- Decision: `get()` in `wise.js` retries a *rejection* from `fetch` 3× at 1s. A non-2xx response is not retried at all.
+- Why: the 18:15 run died on `TypeError: fetch failed` / `EAI_AGAIN` for `api.transferwise.com`. The local resolver was exonerated first, by measurement rather than assumption (0 failures in 60 attempts), so the blip was real and transient, which is the one class of failure that gets better by asking again. A 403 IP allowlist or a 500 does not, and retrying those only delays the report of a real problem.
+- Alternatives rejected: exponential backoff with jitter (the job runs hourly behind a daily sweep, so a run that still fails costs latency and nothing else — the ceiling is 2 seconds of waiting, and the counts are the knob); retrying on any error (would have silently absorbed the 403 the allowlist hint exists to make loud).
+- Status: **superseded 2026-08-03** by "One retry policy, shared by both sources". The transport/status-code split held and is kept; the 2-second ceiling did not.
+
+### 2026-07-29 · The unparsed invariant extends to sources · owner: Claude
+- Decision: Trust and Wise are caught independently in `cli.js`. A source that cannot be reached is reported as `SOURCE FAILED <source>: <reason>` on stderr with a non-zero exit, and the other source's rows are still written.
+- Why: the invariant already said one unrecognised email must not discard the batch that parsed correctly — but it was enforced one level too low. `--source all` ran both sources as a single throw-or-nothing, so a Wise DNS blip ended the process before stdout and took the Trust rows in that run with it. The rule was right; its scope was wrong.
+- Also: `run.sh`'s extract alert no longer labels every non-zero exit "unparsed mail". It sent the first 20 minutes of this investigation at a mail-format change that had not happened.
+- Alternatives rejected: failing the run on any source failure (loses good rows for no gain, since the next pass re-covers the window); succeeding quietly on a dead source (a source that stops working would go unnoticed until reconciliation).
+- Status: active
+
+### 2026-08-03 · One retry policy, shared by both sources · owner: Claude
+- Decision: `src/retry.js` holds the only retry policy — 4 attempts, 1s/2s/4s. `wise.js` uses it (any rejection, unchanged semantics) and `imap.js` now uses it too, on `connect()` only, gated on a transient-code allowlist. Supersedes the 3×1s in `wise.js`.
+- Why: three DNS blips inside 36 hours — 2026-08-01 11:15 and 2026-08-02 17:15 on `imap.gmail.com`, 2026-08-01 23:15 on `api.transferwise.com`. The 23:15 run spent all three of Wise's 1s-apart tries inside one blip, which is exactly the upgrade trigger the old comment named ("raise the counts only if the log shows blips outliving 2 seconds"). The other two were IMAP, which had no retry at all, so one blip on connect failed the whole trust source.
+- Rate, stated honestly: `run.log` holds 12 `extract=1` runs out of 100, but it records only *that* extract failed, never why — the reason is in the alert body, which is not kept. Only the three above are attributable. The other nine all sit in 2026-07-29..07-31 while the parsers and the alerting were being changed, so they are not evidence of nine more blips. **Worth fixing separately:** `log_run` should carry the failure reason, for the same stated reason `run.log` already distinguishes a skipped run from one that never fired.
+- Why shared, not two policies: in each of the three runs the *other* source resolved fine, and the loader's container-DNS calls never failed at all. The fault is the resolver, not either service — fixing it in `wise.js` alone would have left `imap.js` falling over on the identical blip. One policy, two call sites.
+- Why not fix DNS: the deployment host resolves via its router directly, and every candidate cause upstream of that was ruled out by measurement rather than by argument. Host DNS had already been exonerated on 07-29 (0 failures in 60 attempts), no filtering layer's rate limit sits in the path, and an encrypted-DNS proxy had been tried and reverted a month earlier for breaking an unrelated service. Three blips in 36 hours, each hitting one host while the other resolved, with a daily sweep behind it. Riding them out is the proportionate fix.
+- Alternatives rejected: retrying inside the message iteration (would re-yield messages the caller already consumed — only `connect()` is retried, and a fresh `ImapFlow` is built per attempt because a failed instance is spent); retrying any IMAP error (four tries at a wrong password is how a mailbox gets locked, so IMAP is code-gated even though Wise is not); jitter (one process, one query at a time, no herd to spread).
+- Status: active
+
+### 2026-08-03 · The repo gets a remote, and the host clones it · owner: Nathan
+- Decision: `main` pushes to a git remote, and the deployment directory became a clone of that remote rather than a `git archive | tar x` copy.
+- Why: the repo existed on one machine only, so one dead SSD lost the project. The clone is a side benefit that removes a whole class of deploy bug, because a Linux clone writes LF whatever a Windows checkout holds, which is exactly what the archive copy kept getting wrong. It also lets the host answer which commit it is running.
+- Give the host a read-only deploy credential, separate from your own push credential: the host is a deploy target and never needs to write, and reusing a push token there puts write access to your other repos on a box that also holds `.env`.
+- Alternatives rejected: reading straight out of the server's bare-repo storage over `file://` (no credentials at all, but it reaches past the server into its internals and breaks silently if the layout moves); leaving the archive copy in place (the CRLF trap stays, and the host has no way to tell you which commit it is running).
+- Status: active. The first remote was deliberately **private** while `redact.js` was still hardcoding real identity. That blocker is closed, and the public destination is settled in "GitHub only, never npm" below.
+
+### 2026-08-03 · One package, two bins · owner: Nathan
+- Decision: `actual-mail` ships both bins. Supersedes the 2026-07-28 two-package decision.
+- Why: the extract/load seam is the pipe, not the npm registry. Part 1 stays Actual-agnostic and a non-Actual consumer simply ignores the second bin, so the reuse argument survives at half the versioning, publishing and CI overhead.
+- Status: active. **Supersedes:** "Two packages, and Part 1 never converts currency" (2026-07-28) — only its packaging half. The no-conversion-in-Part-1 rule is untouched and still active.
+
+### 2026-08-03 · Parsers are contributed by PR with a redacted fixture · owner: Nathan
+- Decision: a bank is supported only if a redacted sample of its real mail is in this repo with a test asserting the row it produces.
+- Why: the maintainer receives one bank's mail. Any promise about a second bank would be unverifiable, and an unverifiable promise about someone's finances is worse than no support. The fixture is the evidence, and CI is what checks it still holds when the bank changes its template.
+- Alternatives rejected: a declarative regex config (a config language expressive enough for Trust's four shapes is a programming language with worse errors); external plugin packages (moves the evidence outside the repo, which is the one thing that made the claim honest).
+- Status: active
+
+### 2026-08-03 · GitHub only, never npm · owner: Nathan
+- Decision: distribute via `npm i -g github:thelogicmatrix/actual-mail`. No npm publish.
+- Why: npm unpublish is blocked after 72 hours and the name is held permanently either way — a one-way door for no gain at v1. `"private": true` in package.json enforces it.
+- Status: active
+
+### 2026-08-04 · The docs ship host-agnostic, and the host specifics move out · owner: Nathan
+- Decision: `docs/RUNBOOK.md` documents placeholders (`<deploy-dir>`, "your resolver", "three cron entries") and the maintainer's own hostnames, absolute paths, LAN addresses, remote names and vault item names live in a private runbook outside this repo. `docs/sessions/` and a personal Wise account walkthrough were deleted rather than scrubbed.
+- Why: a green `scripts/scan-pii.js` is a PII gate, not an infrastructure review. Nothing in it looks for a hostname, an absolute host path or a git remote name, so the only check on that class of leak is a human read, and the cheapest way to pass a human read is for the material not to be in the tree. Session logs are working notes whose value is entirely to the author and whose contents are entirely about his environment, so per-file scrubbing would have been repeated effort for something nobody downstream reads.
+- Alternatives rejected: scrubbing the session logs in place (recurring cost on every future session, and one miss is a published leak); keeping the host paths in the public runbook as "an example" (an example nobody else can use, that a scanner cannot check, and that names a real machine).
+- Status: active
+
+### 2026-08-05 · A source outage waits three consecutive runs before it alerts · owner: Nathan
+- Decision: `SOURCE FAILED <src>` posts nothing until that source has failed **three consecutive runs**, counted per source in `$HERE/.fail-streak-<src>` and cleared by any clean extract. The run still logs `extract=1` and still exits non-zero; only the notification waits, and `reason=` carries a `quiet[wise=1/3]` marker so a held run is visible in `run.log`. `matched no parser` and any unrecognised failure are **not** gated. The sweep is a reporting window like any other, not an exemption.
+- Why: 15 of the first 139 production runs failed extract, and the ones investigated were resolver blips that fixed themselves by the next run — one Discord message each, none actionable. A channel that cries wolf 15 times in 139 runs is a channel that stops being read, which costs more than the alerts buy. Both figures are measured on the maintainer's own deployment, 2026-07-29 to 08-05; `runs/run.log` is gitignored, so a reader cannot reproduce them. Three in a row is not weather.
+- Alternatives rejected: silencing `SOURCE FAILED` entirely (a real outage then reaches nobody until the data is visibly missing); a time-based cooldown (a cooldown suppresses a *standing* fault, which the per-channel fingerprint budget already handles, and does nothing about a single blip — the wrong axis); one shared counter across sources (two sources blipping on alternate runs would climb it to three and alert on an outage neither of them had); an `ACTUAL_MAIL_*` env setting (this is a judgement about one notification channel's noise floor, not something a deployment varies, and every env name costs a row in the README table and `config.env.example`).
+- Status: **the counting mechanism superseded 2026-08-05** by "Count failures in a window, not in a row", below. The judgement this entry records — that a self-healing blip is not worth a message, and that `matched no parser` is never gated — is unchanged and still active.
+
+### 2026-08-05 · Count failures in a window, not in a row · owner: Claude
+- Decision: replace the consecutive-run streak with a fixed window. Each source keeps the outcome of its last **six** runs in `$HERE/.fail-window-<src>`, and `SOURCE FAILED <src>` posts once **three** of those six are failures. Every run moves the window, clean runs included, so a recovering source ages its failures out instead of having them erased. `SOURCE_FAIL_ALERT_AFTER=3` and `SOURCE_FAIL_WINDOW=6`, constants in `run.sh`. The `quiet[wise=1/3]` marker, the non-gating of `matched no parser`, and the sweep's non-exemption all carry over unchanged.
+- Why: a streak counts only *consecutive* failures, so it is blind to duty cycles. The predecessor's own decay was added because a source failing two runs in three never reached three in a row — and decay closed that case while leaving the next one open. Driving the shipped functions over 40 runs at a 50% failure rate produced **zero alerts**; at 66% it produced 17. A feed that is down half the time is the most ordinary shape a degrading resolver takes, and it was the one shape guaranteed to stay silent forever. A window has no such blind spot: any failure rate at or above the threshold reaches it, whatever the pattern.
+- Alternatives rejected: raising the decay rate (moves the blind spot rather than removing it — every decay rate is mute on some duty cycle); a rolling failure *percentage* (needs a denominator and a minimum sample, so it is two more constants for the same answer); making the window an env setting (same reasoning as the entry above — a noise-floor judgement, not a per-deployment one).
+- Status: active
