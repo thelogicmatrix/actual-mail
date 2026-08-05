@@ -52,6 +52,12 @@ streak to a six-run window, so the old per-source state files are dead. `rm -f
 <deploy-dir>/.fail-streak-*` after step 2. Nothing reads them, so leaving them is harmless
 rather than wrong — but they will sit in the deploy directory forever otherwise.
 
+**Also one-off, and it breaks step 2:** this repo was republished from a fresh root commit, so a
+clone made before that has no common ancestor with it and `git pull --ff-only` fails with
+`refusing to merge unrelated histories`. Do not force the merge — re-clone into a new directory
+and move `config.env`, `mapping.json`, `.env`, `cache/` and `runs/` across. Every one of those
+is gitignored, which is what makes a re-clone cheap rather than a migration.
+
 ## Verify it is actually working
 
 Silence does not prove health, which is why every run appends to `run.log` including runs that
