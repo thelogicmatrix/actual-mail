@@ -88,7 +88,7 @@ hand, so each new recurring merchant needs a rule adding. Pre-stage `imported_pa
 rules are what catch the card rows, since the payee text arrives from the bank rather than from
 Actual's own matcher.
 
-**A new unparsed format.** The run exits non-zero with `UNPARSED <message-id>`. The subject is deliberately not printed: this stderr is what the alert's reason line is derived from, and a bank alert subject carries the amount and often the merchant. Harvest the
+**A new unparsed format.** The run exits non-zero with `UNPARSED <message-id>`. The subject is deliberately not printed: this stderr is what the alert's reason line is derived from, and a bank alert subject carries the amount and often the merchant. **The id is kept in `runs/unparsed.log`**, timestamped, so start there rather than from the alert: `reason=` only records the class (`matched no parser`), and cron discards the stderr the id was printed on. That file exists only once something has failed to parse, and it is written even when the streak gate held the alert. Then harvest the
 message, add or extend a parser under `src/parsers/`, add a redacted fixture, extend the tests.
 Fixtures are redacted `.txt` rather than raw `.eml` so redaction is grep-verifiable. Full
 walkthrough in [WRITING-A-PARSER](WRITING-A-PARSER.md).

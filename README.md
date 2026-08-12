@@ -372,12 +372,14 @@ own cannot tell a healthy quiet day from a stale reconciliation floor discarding
 
 `run.log`'s `reason=` field names the **class** of fault, which for a bank redesign is the
 constant `matched no parser`. The **instance** goes to `runs/unparsed.log`: the per-message
-`UNPARSED <message-id> <subject>` lines, timestamped so they join up with `run.log`. That file
-only exists once something has failed to parse, so its presence is itself a signal, and a source
-outage or a clean run never creates it. It is written before the streak gate decides whether to
-alert, because a held alert is exactly when the record matters most. Host-side only, like every
-other raw-output path here — a mail subject is the sender's words, not this tool's, so it never
-goes to the webhook.
+`UNPARSED <message-id> [note]` lines, timestamped so they join up with `run.log`. That file only
+exists once something has failed to parse, so its presence is itself a signal, and a source outage
+or a clean run never creates it. It is written before the streak gate decides whether to alert,
+because a held alert is exactly when the record matters most.
+
+It records the **message-id, not the subject** — `cli.js` never prints a subject, because a bank
+alert's subject carries the amount and often the merchant. The id is enough to pull the message by
+hand. Host-side either way: the webhook receives the curated reason line and never this.
 
 `scripts/watchdog.sh` is the dead man's switch, on its own cron entry. Everything in `run.sh`
 reports its own failures, which cannot cover the one failure where the job does not run at all:
@@ -394,8 +396,8 @@ This repo is about your bank transactions, so the files it produces are as sensi
 bank statements.
 
 - `runs/` holds the archived rows in plaintext: real merchants, real amounts, real accounts.
-  `runs/unparsed.log` holds message-ids and subject lines of mail no parser matched, which is
-  the same sensitivity as the rows.
+  `runs/unparsed.log` holds message-ids of mail no parser matched. No subjects and no amounts,
+  deliberately, but a message-id still identifies a real message in your mailbox.
 - `config.env` holds your webhook, and `.env` your mailbox and Actual passwords.
 - `.actual-cache/` is a local copy of your budget.
 
