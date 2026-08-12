@@ -136,6 +136,36 @@ run ACTUAL_MAIL_SWEEP=0
 run ACTUAL_MAIL_SWEEP=0 FAKE_EXTRACT_RC=4
 check "a clean run forgets, so a recurrence alerts again" "4" "$(wc -l <"$ALERTS")"
 
+# --- the unparsed message survives the run that found it ---------------------------------
+# One sighting on 2026-07-29 evaporated because run.log kept the exit code and the message-id
+# went to a stderr cron discarded. These assert the RECORD, not the alert: the alert was never
+# the broken half.
+: >"$T/home/runs/unparsed.log"
+run ACTUAL_MAIL_SWEEP=0 FAKE_EXTRACT_RC=1
+check "the unparsed message-id is kept, not just the exit code" "1" \
+      "$(grep -c 'UNPARSED <abc@example.com>' "$T/home/runs/unparsed.log")"
+check "and it is timestamped, so it joins up with run.log" "1" \
+      "$(grep -cE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^ ]+ UNPARSED ' "$T/home/runs/unparsed.log")"
+
+# A held alert is the case that most needs the record, so it is the case that gets checked.
+: >"$T/home/runs/unparsed.log"
+run ACTUAL_MAIL_SWEEP=0 FAKE_EXTRACT_RC=1 FAKE_SOURCE_FAILED=wise
+check "a suppressed alert still leaves the message behind" "1" \
+      "$(grep -c 'UNPARSED <abc@example.com>' "$T/home/runs/unparsed.log")"
+
+# A source outage carries no parser complaint, and `reason=` already names the source. Writing an
+# empty entry for it would make the log's presence stop meaning anything.
+rm -f "$T/home/runs/unparsed.log"
+run ACTUAL_MAIL_SWEEP=0 FAKE_EXTRACT_RC=1 FAKE_UNPARSED=0 FAKE_SOURCE_FAILED=trust-sg
+check "a source outage alone writes no unparsed record at all" "no" \
+      "$([ -f "$T/home/runs/unparsed.log" ] && echo yes || echo no)"
+
+# The clean path must not create it either, or its existence stops being the signal.
+rm -f "$T/home/runs/unparsed.log"
+run ACTUAL_MAIL_SWEEP=0
+check "a clean run leaves no unparsed record" "no" \
+      "$([ -f "$T/home/runs/unparsed.log" ] && echo yes || echo no)"
+
 # The budget spends on DELIVERY, not on the attempt. It used to stamp the slot before the curl, so
 # a revoked webhook -- 401, forever -- cost one attempt and one REJECTED line, and every run after
 # that matched the fingerprint and returned before curl. A failing feed, an unreachable channel,

@@ -370,6 +370,15 @@ Because silence no longer proves health, every run appends a line to `runs/run.l
 runs skipped for overlapping and including the loader's own counts. `extract=0 load=0` on its
 own cannot tell a healthy quiet day from a stale reconciliation floor discarding everything.
 
+`run.log`'s `reason=` field names the **class** of fault, which for a bank redesign is the
+constant `matched no parser`. The **instance** goes to `runs/unparsed.log`: the per-message
+`UNPARSED <message-id> <subject>` lines, timestamped so they join up with `run.log`. That file
+only exists once something has failed to parse, so its presence is itself a signal, and a source
+outage or a clean run never creates it. It is written before the streak gate decides whether to
+alert, because a held alert is exactly when the record matters most. Host-side only, like every
+other raw-output path here — a mail subject is the sender's words, not this tool's, so it never
+goes to the webhook.
+
 `scripts/watchdog.sh` is the dead man's switch, on its own cron entry. Everything in `run.sh`
 reports its own failures, which cannot cover the one failure where the job does not run at all:
 a lost cron entry, a regenerated schedule, a missing `config.env`. It alerts if
@@ -385,6 +394,8 @@ This repo is about your bank transactions, so the files it produces are as sensi
 bank statements.
 
 - `runs/` holds the archived rows in plaintext: real merchants, real amounts, real accounts.
+  `runs/unparsed.log` holds message-ids and subject lines of mail no parser matched, which is
+  the same sensitivity as the rows.
 - `config.env` holds your webhook, and `.env` your mailbox and Actual passwords.
 - `.actual-cache/` is a local copy of your budget.
 

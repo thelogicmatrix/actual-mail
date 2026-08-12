@@ -459,6 +459,24 @@ if [ $EXTRACT_RC -ne 0 ]; then
   # Captured here, where $ERR still holds Part 1's stderr. Part 2 reuses the same file, so by
   # the time the exit trap runs the reason is gone — which is precisely how it went unrecorded.
   REASON="extract: $(fail_reason "$ERR")"
+  # `reason=` records the CLASS of fault, and deliberately so: it is one field on a one-line
+  # record, stripped of commas and cut at 120 chars. For a bank redesign that class is the
+  # constant string `matched no parser`, so the only question a recurrence asks -- WHICH message --
+  # had no answer anywhere on the host. The per-message `UNPARSED <message-id> <subject>` lines go
+  # to stderr, run.sh passes stderr to the host's stderr, and cron discards it. The row archive
+  # keeps what parsed; nothing kept what did not. So on 2026-07-29 the system correctly reported
+  # "something is wrong", the condition evaporated two minutes later, and it was unreconstructable.
+  #
+  # Written BEFORE the streak gate, because a suppressed alert is exactly when the record matters
+  # most: the gate's whole purpose is to stay quiet, and quiet used to mean forgotten too.
+  #
+  # Host-side only, like every other raw-output path here -- alert() sends the curated reason and
+  # never the stderr, because that text is whatever the binaries beneath it chose to print. A mail
+  # subject is the sender's words, not ours, so it stays on the box.
+  if grep -qE 'UNPARSED|matched no parser' "$ERR" 2>/dev/null; then
+    grep -E 'UNPARSED|matched no parser' "$ERR" \
+      | sed "s/^/$(date -Is) /" >>"$RUNS/unparsed.log"
+  fi
   if streak_gate "$ERR"; then
     alert extract "extract exited $EXTRACT_RC (see below)" "$ERR"
   else
