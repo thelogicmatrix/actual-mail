@@ -265,10 +265,12 @@ try {
     + `${skipped ? `, ${skipped} skipped as reconciled` : ''}`
     + `${alreadyPresent ? `, ${alreadyPresent} already present` : ''}`
     + `${transfers ? `, ${transfers} transfer(s)` : ''}`
-    // Both legs are already in the budget as ordinary transactions. Nothing was lost and
-    // nothing was written, but they are not linked, so this is worth saying out loud
-    // rather than folding into `already present`.
-    + `${transfersAlreadySeparate ? `, ${transfersAlreadySeparate} transfer(s) already imported separately` : ''}`
+    // At least one leg was already in the budget as an ordinary transaction, so the pair was
+    // refused rather than linked — linking would mean editing a transaction already there. The
+    // other leg, if it was new, IS written and counted in `imported`. Not "already imported
+    // separately": that wording says both legs are present, which was the reading that hid a
+    // dropped leg for a whole release.
+    + `${transfersAlreadySeparate ? `, ${transfersAlreadySeparate} transfer(s) left unlinked` : ''}`
     // Same amount, same window, more than one candidate. Left as ordinary transactions
     // rather than guessed at.
     + `${ambiguous ? `, ${ambiguous} ambiguous, left unpaired` : ''}`;
