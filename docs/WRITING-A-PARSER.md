@@ -126,8 +126,9 @@ export function parseExample(text, rawRef, subject = '') {
   return null;
 }
 
-// The registry contract. `from` is the IMAP FROM filter for this bank's alert mail.
-export default { id: 'example-bank', from: 'alerts@example.com', parse: parseExample };
+// The registry contract. `from` is the IMAP FROM filter for this bank's alert mail — a bare
+// domain or local part, never a full address, because the leak gate in section 5 rejects one.
+export default { id: 'example-bank', from: 'example-bank.sg', parse: parseExample };
 ```
 
 That is the whole thing, and it produces exactly the row printed in section 1.
@@ -138,9 +139,14 @@ followed by a full date, so it cannot swallow an " on " that appears inside a me
 The `+08:00` offset is hardcoded, because it is a fact about how this bank writes its emails,
 not a global setting. Put your bank's own offset in your own parser.
 
-The default export is the whole contract: an `id`, a `from` address used as the mailbox search
+The default export is the whole contract: an `id`, a `from` fragment used as the mailbox search
 filter, and `parse`. A test in `test/parsers.test.js` asserts that shape for every registered
 parser, so getting it wrong fails the suite rather than failing at 05:30.
+
+Keep `from` a fragment. The IMAP FROM search matches on substring, so a bare domain or local part
+loses no selectivity, and `scripts/scan-pii.js` flags a full `user@host` that is not an
+`example.com` placeholder — put your bank's real sender address here and the gate in section 5
+fails on the one line this example handed you.
 
 ## 4. The three return values
 
@@ -171,8 +177,8 @@ money-shaped token at all cannot be a transaction format that was missed.
 
 ## 5. Redacting your sample, before you commit anything
 
-This is the step where you could leak your own data into a public repository. Do it before
-`git add`, not after.
+This is the step where you could leak your own data into a public repository. Do it before you
+commit, and **stage before you scan** — step 4 says why.
 
 1. Copy `private.example.json` to `private.local.json` and fill in your own name, email address
    and any account or pot nicknames. That file is gitignored and never leaves your machine.
@@ -193,11 +199,16 @@ This is the step where you could leak your own data into a public repository. Do
    - amounts become obviously fake round numbers
    - any pot or account nickname becomes `TEST POT`
    - your own name and email become `testuser` and `testuser@example.com`
-4. Run the gate:
+4. Stage your new files, **then** run the gate:
 
    ```bash
+   git add src/parsers/<parser-id>.js test/fixtures/<parser-id>
    npm run scan
    ```
+
+   Staging first is not tidiness: `scan-pii.js` enumerates `git ls-files`, so run it over
+   untracked files and it scans none of them and prints clean — a green gate over the exact
+   work you wanted checked, which is worse than no gate because you would trust it.
 
    It names the file and the offending string for anything that survived, and it exits
    non-zero for as long as it has findings. Do not commit until your files are clean.
@@ -299,7 +310,8 @@ npm test
 - [ ] At least one redacted fixture per message shape, under `test/fixtures/<parser-id>/`.
 - [ ] A test asserting the full row for each shape, plus one `ignored` case and one `null` case.
 - [ ] `npm test` passes.
-- [ ] `npm run scan` reports nothing in the files you added.
+- [ ] `npm run scan` reports nothing in the files you added — run from the repository root, and
+      **after** staging them, or it never looks at them.
 - [ ] You read your own fixtures with your own eyes after redacting them.
 - [ ] `amount` is a string, `date` keeps the bank's offset, refunds are positive.
 

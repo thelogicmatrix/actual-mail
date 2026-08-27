@@ -16,9 +16,14 @@ Raw drops go to [backlog/INBOX.md](backlog/INBOX.md).
 - **Off-host watchdog.** The one failure neither script can report is a missing `config.env`,
   since the alert webhook lives in it. Closing this needs a checker on a different host.
   Recorded as an idea in FEATURES, not yet a committed piece of work.
-- **Cross-source double-count.** A transfer from the bank to Wise appears in both the Trust feed
-  and the Wise API. Both sides are imported and the transfer is flagged manually in Actual.
-  Automating the match is unstarted.
+- **Cross-source double-count, narrowed 2026-08-27.** Legs that land in the same run now pair and
+  are written as one two-sided transfer, so nothing inside a run is flagged by hand. What is left is
+  two cases. Legs that arrive in *different* runs — a source down for a run is enough — are counted
+  and reported as a transfer left unlinked and never joined up, because joining them means editing
+  transactions already in the budget; that was declined on 2026-08-27 rather than deferred, so this
+  is a limitation to state rather than work to schedule. **Cross-currency transfers are not detected
+  at all**, since two legs in different currencies are not equal and opposite and identifying the
+  pair would depend on an FX rate. That one is genuinely unstarted.
 - ~~**`--source` accepts an unknown value silently.**~~ Closed 2026-08-05: `src/cli.js` rejects an
   unmatched `--source` with a non-zero exit naming the valid ids, covered by `test/cli.test.js`.
   Original note: **`--source` accepts an unknown value silently.** A typo exits 0 with zero rows

@@ -15,6 +15,7 @@ between them is the whole interface.
 | `src/imap.js` | IMAP fetch and MIME decode, including quoted-printable before any regex runs |
 | `src/parsers/index.js` | the parser registry — an explicit list, one entry per bank |
 | `src/parsers/trust-sg.js` | Trust Bank alert-email parsers, one per message shape |
+| `src/parsers/uob-sg.js` | UOB alert-email parsers, one per message shape |
 | `src/sources/wise.js` | Wise API client |
 | `src/row.js` | the normalised row, and the deterministic row id |
 | `src/output.js` | CSV and JSONL rendering |
@@ -26,6 +27,7 @@ between them is the whole interface.
 |---|---|
 | `src/load/load.js` | reads JSONL on stdin, maps accounts, dedupes, writes to Actual |
 | `src/load/fx.js` | foreign-amount conversion (ECB reference rate, plus a measured blended markup on alert-derived rows only) |
+| `src/load/transfers.js` | which rows are two sides of one internal movement, and which single rows name their own counterparty account |
 
 Both halves ship in one package on purpose. The extract/load seam is the pipe, not the npm
 registry, so Part 1 stays Actual-agnostic and a non-Actual consumer simply ignores the second
@@ -116,8 +118,20 @@ The full environment surface, including these, is tabulated once in the
 - **Alert amounts are authorisation, not settled.** FX rows are estimates by construction and
   domestic rows can still differ if a hold settles at a different amount. Every estimated row
   says so in its note.
-- **Cross-source double-count.** A transfer from the bank to Wise appears in both the Trust feed
-  and the Wise API. Both are imported; flagging the transfer in Actual is manual.
+- **Cross-source double-count, narrowed rather than closed.** A transfer between two of your own
+  accounts appears in both feeds. Within one run `src/load/transfers.js` pairs the two legs and one
+  transaction is written carrying the target's transfer payee, so nothing is flagged by hand. Three
+  things that still are. Legs that arrive in *different* runs cannot pair at all — a source down for
+  a run separates them — and are counted and reported as a transfer left unlinked, never joined up,
+  because joining them means editing transactions already in the budget. **Cross-currency transfers
+  are not detected**, since two legs in different currencies are not equal and opposite and
+  identifying the pair would depend on an FX rate. And a pair with one leg already in the budget is
+  deliberately not treated as a pair: both rows go through as ordinary transactions so the new leg
+  is still written, and the count says a transfer was left unlinked.
+- **The transfer *booking* path has never run against live mail.** The 2026-08-27 verification
+  exercised detection, the refusal of a same-instant currency conversion inside one account, and the
+  degrade to ordinary transactions — but every live pair had one leg in the budget already, so no
+  transfer was actually written. That path rests on `test/load/` and on nothing else.
 - **FX depends on an external rate service.** If frankfurter.dev is unreachable, a run
   containing a foreign row fails rather than importing a guessed number. That is the intended
   trade, but it means a third-party outage is a failed run.

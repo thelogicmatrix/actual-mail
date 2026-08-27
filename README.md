@@ -12,9 +12,9 @@ into YNAB, Firefly III, Beancount or a spreadsheet just as happily.
 
 Probably not yet, and that is the honest answer rather than a disclaimer.
 
-Bundled sources: **Trust Bank (Singapore)**, via alert email; **Wise**, via its API rather than
-email. Only the first is a *parser* — Wise returns structured data, so there is no mail to parse
-and no fixture to redact.
+Bundled sources: **Trust Bank (Singapore)** and **UOB (Singapore)**, both via alert email;
+**Wise**, via its API rather than email. Only the first two are *parsers* — Wise returns
+structured data, so there is no mail to parse and no fixture to redact.
 
 Every bank writes its own alert emails and changes them without notice, so nobody can promise
 this works for an arbitrary bank. What it does promise:
@@ -275,14 +275,19 @@ beside the leg already created here and the money arrives twice. So the entry is
 you give it by checking: move a small amount in, and confirm nothing arrives from the receiving
 bank while the sending bank's alert does. Without the entry, such a payee is just a payee.
 
-A licence is a claim about a bank, and a row beats a claim. If the same run also holds a row
-that pairs with this one, that row is the receiving bank contradicting the licence: the payee is
-left alone and the two rows import separately, counted as a transfer left unlinked.
+A licence is a claim about a bank, and a row beats a claim. If the same run also holds a row that
+pairs with this one, that row is the receiving bank contradicting the licence, and what happens
+next depends on the budget. Where the pair is **refused** because one of its legs is already
+imported, the licence is not applied either: the payee is left alone and the two rows import
+separately, counted as a transfer left unlinked. Where neither leg is present the pair is simply
+booked as a transfer — one transaction with the transfer payee, counted in `transfers` — so the
+licence is bypassed there too, by the evidenced route rather than the claimed one.
 
-`<key>` must also be a key in its own right. A `no-inbound-alert:<key>` with no `<key>` beside
-it is unreachable — the payee is resolved through the ordinary key first — so the licence does
-nothing and transfers into that account quietly go back to being ordinary spends. The loader
-warns at the start of every run when it finds one, counting them on stderr and naming them on
+`<key>` must be a **four-digit account key** in its own right, since four digits is the only
+thing a payee can name. A `no-inbound-alert:<key>` with no matching `<key>` beside it, or over a
+named key like `main`, is unreachable — the payee is resolved through the ordinary four-digit key
+first — so the licence does nothing and transfers into that account quietly go back to being
+ordinary spends. The loader warns when it finds one, counting them on stderr and naming them on
 stdout, and imports anyway: an inert licence loses a link, not money.
 
 Pot moves are written as **two-sided transfers** rather than spends. The row's payee becomes
@@ -440,8 +445,12 @@ substitute for reading your own diff. It catches shapes, not everything.
    construction, and a domestic row can still settle at a different figure if a hold changes.
    Every estimated row says so in its note. Monthly reconciliation is expected, not
    exceptional.
-2. **Cross-source double counting.** A transfer from a bank account to Wise appears in both
-   feeds. Both sides are imported, and marking it as a transfer in Actual is manual.
+2. **Cross-source double counting, within one run only.** A transfer between two of your own
+   accounts appears in both feeds. Legs that land in the **same** run are paired and written as
+   one two-sided transfer. Legs that arrive in different runs — a source down for a run is
+   enough — are counted and reported as a transfer left unlinked, and joining them up is yours to
+   do: the loader never edits a transaction already in your budget. **Cross-currency transfers are
+   not detected at all**, since the two legs are not equal and opposite.
 3. **Fees and interest never alert**, so they never enter this feed at all.
 4. **Conversion depends on an external rate service.** Unreachable means the run fails rather
    than importing an unconverted or guessed number.
