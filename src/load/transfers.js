@@ -40,9 +40,17 @@ function isPair(a, b, mapping) {
     && a.currency === b.currency
     && minor === -toMinorUnits(b.amount)
     // RESOLVED account ids, not row keys. Several keys point at one Actual account in a real
-    // mapping, so a key comparison books nonsense transfers inside a single account. An
-    // unmapped account yields undefined on both sides and correctly fails this test.
+    // mapping, so a key comparison books nonsense transfers inside a single account.
+    //
+    // BOTH sides need the undefined guard, and this is not belt-and-braces. Guarding only `a`
+    // makes isPair ASYMMETRIC: with `b` unmapped, mapping[b.account] is undefined, so the
+    // inequality below passes and isPair(a, b) is true while isPair(b, a) is false. The effect
+    // is not a false pair, mutual uniqueness still refuses it, but `a` is counted ambiguous
+    // when no ambiguity exists — and if `a` also has a GENUINE partner, `a` then has two
+    // candidates and the real transfer is refused and written as separate income and expense.
+    // Reachable the first time an alert arrives from a bank whose key is not in mapping.json yet.
     && mapping[a.account] !== undefined
+    && mapping[b.account] !== undefined
     && mapping[a.account] !== mapping[b.account]
     && Math.abs(Date.parse(a.date) - Date.parse(b.date)) <= WINDOW_MS;
 }

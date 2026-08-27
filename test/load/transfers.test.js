@@ -65,7 +65,24 @@ test('two keys resolving to ONE Actual account never pair', () => {
 test('an unmapped account never pairs', () => {
   const a = row({ id: 'a', account: 'nope', amount: '-50.00' });
   const b = row({ id: 'b', account: 'main', amount: '50.00' });
-  assert.equal(pairRows([a, b], MAPPING).pairs.length, 0);
+  const { pairs, ambiguous } = pairRows([a, b], MAPPING);
+  assert.equal(pairs.length, 0);
+  // And it is not AMBIGUOUS either — no ambiguity exists here. This assertion is the
+  // regression test for the asymmetric-guard bug: with only the `a` side guarded, mutual
+  // uniqueness still refuses the pair so pairs.length stays 0, but ambiguous comes back 1.
+  assert.equal(ambiguous, 0);
+});
+
+test('an unmapped row does not block a GENUINE pair of the same magnitude', () => {
+  // Two correctly mapped accounts, one real transfer, plus an unrelated row from a bank not
+  // yet in mapping.json. The real transfer must survive.
+  const out = row({ id: 'a', account: 'main', amount: '-700.00' });
+  const into = row({ id: 'b', account: 'uob', amount: '700.00' });
+  const stray = row({ id: 'c', account: 'nope', amount: '700.00' });
+  const { pairs, ambiguous } = pairRows([out, into, stray], MAPPING);
+  assert.equal(pairs.length, 1);
+  assert.equal(pairs[0].out.id, 'a');
+  assert.equal(ambiguous, 0);
 });
 
 test('zero-amount rows never pair, because 0 === -0', () => {
@@ -80,7 +97,10 @@ test('an ambiguous set is refused and counted, not guessed', () => {
   const c = row({ id: 'c', account: 'main', amount: '50.00' });
   const { pairs, ambiguous } = pairRows([a, b, c], MAPPING);
   assert.equal(pairs.length, 0);
-  assert.ok(ambiguous > 0);
+  // Exactly 3, not 'more than 0'. `ambiguous` counts ROWS left unpaired, not clusters, because
+  // the run line says 'left unpaired' and a row count is what tells you how many transactions
+  // to go and look at. Pinned here so Task 4 cannot print a number nothing defines.
+  assert.equal(ambiguous, 3);
 });
 
 test('a differing amount scale still pairs, because comparison is in minor units', () => {
