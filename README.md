@@ -275,6 +275,10 @@ beside the leg already created here and the money arrives twice. So the entry is
 you give it by checking: move a small amount in, and confirm nothing arrives from the receiving
 bank while the sending bank's alert does. Without the entry, such a payee is just a payee.
 
+A licence is a claim about a bank, and a row beats a claim. If the same run also holds a row
+that pairs with this one, that row is the receiving bank contradicting the licence: the payee is
+left alone and the two rows import separately, counted as a transfer left unlinked.
+
 `<key>` must also be a key in its own right. A `no-inbound-alert:<key>` with no `<key>` beside
 it is unreachable — the payee is resolved through the ordinary key first — so the licence does
 nothing and transfers into that account quietly go back to being ordinary spends. The loader

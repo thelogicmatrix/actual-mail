@@ -685,8 +685,8 @@ test('a leg below the reconciliation floor cannot pair', async () => {
 });
 
 test('a healthy re-run of a booked transfer is not reported as a split pair', async () => {
-  // transfersAlreadySeparate means "both legs are in the budget as ordinary transactions", a
-  // thing a human has to go and look at. A re-run of a transfer we booked ourselves is not
+  // transfersAlreadySeparate means at least one leg of this movement is already in the budget,
+  // so the pair was left unlinked — a thing a human has to go and look at. A re-run of a transfer we booked ourselves is not
   // that, and reporting it would cry wolf on money on every single run. Pinned because the
   // dedupe set holds the joined id only as its PARTS unless the whole id is added too, and
   // with only the parts every re-run of every healthy transfer counted here.
@@ -854,4 +854,36 @@ test('a pair whose partner is already in the budget still writes the leg that is
   assert.equal(api.written.get('ACCT_B').length, 1);
   assert.equal(api.written.get('ACCT_B')[0].amount, -70000);
   assert.equal(api.written.get('ACCT_A').length, 1, 'nothing added to the side that had it');
+});
+
+test('neither leg of a refused pair may invent a transfer from its payee', async () => {
+  // Refusing a pair drops both rows out of pairedOut, so each falls through to the payee path.
+  // A payee naming a licensed account then books an invented leg into the very account whose
+  // real row is in this same batch — one movement reported as both a transfer and a transfer
+  // left unlinked, with the target account holding it twice once Actual mirrors.
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+
+  // The debit names the target. Seed the credit so the pair is refused for budget state.
+  const a = sink();
+  a.written.set('ACCT_B', [{ imported_id: 'xin', amount: 70000, date: '2026-08-27' }]);
+  const out = await loadRows(
+    [xrow({ id: 'out', account: 'main', amount: '-700.00', payee: 'A/C ending 0000' }),
+     xrow({ id: 'in', account: 'uob', amount: '700.00' })],
+    XFER_MAPPING, a, () => null, opts);
+  assert.equal(out.transfers, 0, 'the pairing row is the licence being contradicted');
+  assert.equal(out.transfersAlreadySeparate, 1);
+  assert.equal(a.written.get('ACCT_A')[0].payee_name, 'A/C ending 0000');
+  assert.equal(a.written.get('ACCT_B').length, 1, 'the target gains nothing');
+
+  // The same exposure in the other direction: the CREDIT leg carries the naming payee.
+  const b = sink();
+  b.written.set('ACCT_B', [{ imported_id: 'xout', amount: -70000, date: '2026-08-27' }]);
+  const into = await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00', payee: 'A/C ending 0000' })],
+    XFER_MAPPING, b, () => null, opts);
+  assert.equal(into.transfers, 0);
+  assert.equal(into.transfersAlreadySeparate, 1);
+  assert.equal(b.written.get('ACCT_A')[0].payee_name, 'A/C ending 0000');
+  assert.equal(b.written.get('ACCT_B').length, 1);
 });

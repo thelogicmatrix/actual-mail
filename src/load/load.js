@@ -212,10 +212,20 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   // the legacy check in the dedupe — the same loss, unreported. The window is narrow: legacy
   // ids stopped being written on 2026-08-06 and no row below the reconciliation floor is in
   // scope to collide.
+  const refused = new Set();
   const booked = pairs.filter(({ out, into }) => {
     if (seen.has(`${out.id}+${into.id}`)) return true;
     if (!seen.has(out.id) && !seen.has(into.id)) return true;
     transfersAlreadySeparate += 1;
+    // BOTH legs, because refusing the pair also drops them out of `pairedOut`, and a row with
+    // no partner falls through to the payee path below and may invent a leg into the very
+    // account whose real row is sitting in this same batch. The licence there claims a bank
+    // sends no inbound alert; a row that PAIRS with this one is that bank contradicting the
+    // licence, so the row wins and the licence is not applied. This is not a search for an
+    // opposing row — pairRows already found these two and we refused them over budget state,
+    // not over evidence. Ignoring evidence already in hand would be the indefensible part.
+    refused.add(out.id);
+    refused.add(into.id);
     return false;
   });
 
@@ -273,7 +283,7 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
       // measurement. A named account without one is an ordinary payee, exactly as an unmapped
       // account key already is.
       const partner = pairedOut.get(row.id);
-      const named = partner ? null : namedAccount(row, mapping);
+      const named = (partner || refused.has(row.id)) ? null : namedAccount(row, mapping);
       const targetKey = partner ? partner.account : (noInboundAlert.has(named) ? named : null);
       const targetId = targetKey ? mapping[targetKey] : null;
       // A payee naming the row's OWN account is not a transfer, it is a note to self.

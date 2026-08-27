@@ -265,8 +265,9 @@ try {
     + `${skipped ? `, ${skipped} skipped as reconciled` : ''}`
     + `${alreadyPresent ? `, ${alreadyPresent} already present` : ''}`
     + `${transfers ? `, ${transfers} transfer(s)` : ''}`
-    // At least one leg was already in the budget as an ordinary transaction, so the pair was
-    // refused rather than linked — linking would mean editing a transaction already there. The
+    // At least one leg was already in the budget — an ordinary transaction, a transfer leg
+    // written under an older mapping, or a row in another account — so the pair was refused
+    // rather than linked — linking would mean editing a transaction already there. The
     // other leg, if it was new, IS written and counted in `imported`. Not "already imported
     // separately": that wording says both legs are present, which was the reading that hid a
     // dropped leg for a whole release.
