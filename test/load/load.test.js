@@ -718,11 +718,14 @@ test('the credit leg arriving alone after the pair cannot re-import', async () =
     'the credit side is Actual\'s mirror leg to create, never ours to write');
 });
 
-test('a leg already in another account blocks the transfer, and is reported', async () => {
+test('a leg already in the budget blocks the transfer, but the OTHER leg is still written', async () => {
   // Run one: only the credit source was up, so that leg imported as an ordinary transaction
   // into its own account. SOURCE FAILED in runs/run.log makes this the ordinary shape of a
   // single-source outage, not an exotic replay. Run two sees both legs and pairs them, and the
   // written leg goes to the DEBIT account, which has never held either id.
+  //
+  // Refusing the pair used to drop that debit with it, so the debit account came out short by
+  // the whole amount, reported only as a count whose name says both legs are present.
   const api = sink();
   const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
   await loadRows([xrow({ id: 'in', account: 'main', amount: '700.00' })],
@@ -731,8 +734,11 @@ test('a leg already in another account blocks the transfer, and is reported', as
     [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
      xrow({ id: 'in', account: 'main', amount: '700.00' })],
     XFER_MAPPING, api, () => null, opts);
-  assert.equal(paired.imported, 0, 'writing it would mirror a second credit onto the same money');
+  assert.equal(paired.imported, 1, 'the debit leg is new, and is written as an ordinary row');
+  assert.equal(paired.transfers, 0, 'not as a transfer — that would mirror a second credit');
   assert.equal(paired.transfersAlreadySeparate, 1);
+  assert.equal(api.written.get('ACCT_B')[0].imported_id, 'xout', 'its own id, not a joined one');
+  assert.equal(api.written.get('ACCT_A').length, 1, 'and the credit side gains nothing');
 });
 
 test('a legacy id is matched per account, never run-wide', async () => {
@@ -771,8 +777,13 @@ test('a pair straddling midnight SGT reads BOTH days, so the earlier leg is stil
   assert.equal(api.written.get('ACCT_A')[0].date, '2026-08-27');
   // Run two: both legs pair, and the written leg is the debit, dated the 28th.
   const paired = await loadRows([debit, credit], XFER_MAPPING, api, () => null, opts);
-  assert.equal(paired.imported, 0, 'the credit leg is already in the budget, a day earlier');
-  assert.equal(paired.transfersAlreadySeparate, 1);
+  // The credit is found a day earlier, so this is not a pair: the debit writes as an ordinary
+  // row and the transfer is reported unlinked. Read the 28th alone and the credit is invisible,
+  // which shows up here as transfersAlreadySeparate 0 and a joined imported_id.
+  assert.equal(paired.transfersAlreadySeparate, 1, 'the credit leg was found, on the 27th');
+  assert.equal(paired.imported, 1, 'the debit leg is new');
+  assert.equal(api.written.get('ACCT_B')[0].imported_id, 'xout', 'an ordinary row, not a transfer');
+  assert.equal(api.written.get('ACCT_A').length, 1, 'the credit side is untouched');
 });
 
 test('a transfer is counted and reported when it is WRITTEN, not when it is detected', async () => {
@@ -822,4 +833,25 @@ test('an unlicensed payee target does not double when the real counter-leg arriv
   assert.equal(r.ambiguous, 0, 'pairing refused it silently — nine minutes is outside the window');
   assert.equal(api.written.get('ACCT_B').length, 1, 'the counter-leg, once');
   assert.equal(api.written.get('ACCT_B')[0].amount, 137);
+});
+
+test('a pair whose partner is already in the budget still writes the leg that is not', async () => {
+  // The live dry run, in isolation. The monthly UOB-to-Trust transfer: the Trust credit has been
+  // in the budget for months, the UOB debit is brand new because UOB was only mapped today. The
+  // pair is refused — correctly, since linking would mean editing a transaction already there —
+  // but the debit is money that has never been booked and must still land.
+  const api = sink();
+  api.written.set('ACCT_A', [{ imported_id: 'xin', amount: 70000, date: '2026-08-27' }]);
+  const r = await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.imported, 1, 'the UOB debit is new money and is written');
+  assert.equal(r.transfers, 0);
+  assert.equal(r.transfersAlreadySeparate, 1, 'reported as a transfer left unlinked');
+  assert.equal(r.alreadyPresent, 1, 'the Trust credit was already there');
+  assert.equal(api.written.get('ACCT_B').length, 1);
+  assert.equal(api.written.get('ACCT_B')[0].amount, -70000);
+  assert.equal(api.written.get('ACCT_A').length, 1, 'nothing added to the side that had it');
 });
