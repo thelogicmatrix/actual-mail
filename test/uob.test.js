@@ -92,6 +92,31 @@ test('the one-off card welcome notice is ignored by subject, not parsed', () => 
     { ignored: true, reason: 'subject' });
 });
 
+// The lowercase " on " and " from " inside the counterparty are the whole point. Both are
+// substrings of the fixed account clause the pattern uses as its right-hand anchor, so this is
+// what proves the lazy (.+?) stops at the real clause and not at the first lookalike inside a
+// name. The failure it protects against is a maintainer widening the pattern by dropping the
+// ` from your a/c ending (\d{4}) at ` tail: every other test still passes at that point, while
+// payees silently absorb the account clause.
+test('a counterparty name containing " on " and " from " does not truncate the payee', () => {
+  const row = parseUob(
+    'You made/scheduled a funds transfer(s) of SGD 100.00 to TEST COUNTERPARTY on and from SG '
+    + 'from your a/c ending 0000 at 9:00AM SGT, 24 Mar 26.', REF, '');
+  assert.equal(row.payee, 'TEST COUNTERPARTY on and from SG');
+});
+
+// Every fixture amount is under 1000, and so is the largest real amount in the 30-message
+// sample, so nothing else exercises the comma strip. It is a live path rather than a
+// hypothetical: the monthly transfers sit between 500 and 950. The failure it guards is
+// `replaceAll(',', '')` being deleted as redundant, after which the loader's Number('12,345')
+// is NaN and Actual is handed amount: NaN without anything throwing.
+test('thousands separators are stripped', () => {
+  const row = parseUob(
+    'You made/scheduled a funds transfer(s) of SGD 12,345.67 to TEST COUNTERPARTY '
+    + 'from your a/c ending 0000 at 9:00AM SGT, 24 Mar 26.', REF, '');
+  assert.equal(row.amount, '-12345.67');
+});
+
 test('an unrecognised message carrying money returns null so the run fails loudly', () => {
   assert.equal(parseUob('Something never seen before, with SGD 5.00 in it', REF, 'Surprise'), null);
 });

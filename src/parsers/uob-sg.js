@@ -45,6 +45,26 @@ function outLike(source, type) {
 const PARSERS = [
   // Each payee capture is immediately followed by a fixed account clause, which is what stops
   // a lazy (.+?) running past a counterparty name containing " on " or " from ".
+  // "made/scheduled" is UOB's own generic template wording, and it means this parser cannot
+  // tell an executed transfer from a scheduled one. Not fixable here: the text carries no
+  // second date and no status field to read.
+  //
+  // Measured over the 30-message sample, all six historical funds transfers were executed
+  // immediately rather than scheduled. Each one has a Trust credit alert stamped to the same
+  // minute, so no scheduled instance has ever been observed.
+  //
+  // The unhandled case, if it ever occurs: a transfer scheduled on the 24th for value on the
+  // 1st is written with the scheduling timestamp as its date, and a later cancellation produces
+  // no alert this parser can see, because the "is successful" status mail carries no amount and
+  // is ignored by the no-money-token fallback. The budget would then hold spend that never
+  // happened, with no offsetting row and no UNPARSED signal to notice it by.
+  //
+  // A second observed limitation, recorded here because it has the same shape. Three PayNow
+  // transfers from March and April have only a status mail, with no amount-bearing sibling,
+  // whereas the 27 August one has both. UOB's amount-bearing PayNow alert is evidently newer
+  // than the account, so a PayNow made before that change produces no row at all. All three
+  // are below the reconciliation floor and would be skipped regardless, so this needs no code.
+  // The note exists so that a gap in the row set is not read as a parser bug.
   outLike(String.raw`You made/scheduled a funds transfer\(s\) of ${AMT} to (.+?) from your a/c ending (\d{4}) at ${WHEN}`,
     'transfer_out'),
   outLike(String.raw`You made a PayNow transfer of ${AMT} to (.+?) on your a/c ending (\d{4}) at ${WHEN}`,
