@@ -276,7 +276,10 @@ you give it by checking: move a small amount in, and confirm nothing arrives fro
 bank while the sending bank's alert does. Without the entry, such a payee is just a payee.
 
 A licence is a claim about a bank, and a row in the same run is that bank's own behaviour.
-**The licence holds unless the same run contains a row this one pairs or contests with.** Two ways
+**The licence holds unless the same run contains a row this one pairs or contests with.** Every row
+handed to the run counts as evidence, including one the reconciliation floor then skips: an archive
+re-piped after the floor has moved past part of it splits a pair across the floor, and the leg that
+survives must not treat its own counterpart's absence as permission. Two ways
 to be that row. It paired with a counter-leg and the pair was **refused** because one of the two
 legs was already in your budget: the payee is left alone, both rows import separately, and the run
 counts a transfer left unlinked. Or it was **contested** — it had two or more candidate
@@ -287,10 +290,20 @@ a transfer, one transaction with the transfer payee counted in `transfers`, so t
 bypassed there too, by the evidenced route rather than the claimed one.
 
 A counter-leg that pairing never treated as a candidate at all leaves the licence fully in force,
-and there are exactly three ways to be that: the two legs are more than two minutes apart, they
-are in different currencies, or they arrived in different runs. Finding those would mean a general
+and there are four ways to be that: the two legs are more than two minutes apart, they are in
+different currencies, the counter-leg is a **pot** transfer (pot moves have their own path and are
+excluded from pairing), or the legs arrived in different runs. Finding those would mean a general
 search for an opposing row, which was deliberately declined. They are what the licence carries
 alone, and they are why it has to be a measurement rather than an opinion.
+
+One more thing the licence buys, and it is a real cost. A payee is read as naming your own account
+whenever it contains any four-digit group that a mapping key matches, and a mapping key carries no
+bank name — four digits is all a payee gives you. So paying a third party whose account happens to
+end in the same four digits as a licensed account books that spend as an internal transfer: a
+phantom credit appears in your own account and the expense disappears from your budget. Roughly one
+outbound transfer in ten thousand, per licensed account. There is no cheap fix in code, so licence
+only the accounts you actually need, and treat an unexplained credit into a licensed account as
+this until proven otherwise.
 
 `<key>` must be a **four-digit account key** in its own right, since four digits is the only
 thing a payee can name. A `no-inbound-alert:<key>` with no matching `<key>` beside it, or over a

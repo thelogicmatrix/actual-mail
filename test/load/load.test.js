@@ -921,3 +921,26 @@ test('a licensed row with no candidate at all still books its transfer', async (
   assert.equal(api.written.get('ACCT_A').find((t) => t.imported_id === 'xsolo').payee,
     'payee-of-ACCT_B');
 });
+
+test('a counter-leg below the reconciliation floor still bars the payee path', async () => {
+  // pairRows runs on the post-floor rows, so a counter-leg on or below the floor leaves the
+  // surviving leg with no partner and uncontested — straight into the payee path, inventing a
+  // leg beside money already booked. Re-piping an archive from runs/ after the floor has moved
+  // past part of it splits a pair across the floor exactly this way.
+  const api = sink();
+  const debit = xrow({ id: 'out', account: 'uob', amount: '-700.00',
+    date: '2026-08-20T23:59:00+08:00' });
+  const credit = xrow({ id: 'in', account: 'main', amount: '700.00',
+    date: '2026-08-21T00:00:00+08:00', payee: 'A/C ending 0000' });
+  // The debit imported on an earlier run, under an earlier floor.
+  await loadRows([debit], XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-08-19', transferPayeeFor: xferPayee });
+  assert.equal(api.written.get('ACCT_B').length, 1);
+  // Now the floor has moved past it, and the archive is re-piped with both legs.
+  const r = await loadRows([debit, credit], XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-08-20', transferPayeeFor: xferPayee });
+  assert.equal(r.skipped, 1, 'the debit is below the floor and is not written again');
+  assert.equal(r.transfers, 0, 'but it is still evidence, so the licence stands down');
+  assert.equal(api.written.get('ACCT_A')[0].payee_name, 'A/C ending 0000');
+  assert.equal(api.written.get('ACCT_B').length, 1, 'no second debit is mirrored in');
+});

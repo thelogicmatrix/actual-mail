@@ -121,8 +121,11 @@ The full environment surface, including these, is tabulated once in the
 - **Cross-source double-count, narrowed rather than closed.** A transfer between two of your own
   accounts appears in both feeds. `src/load/transfers.js` pairs the two legs and one transaction is
   written carrying the target's transfer payee, so nothing inside a run is flagged by hand — but
-  only where all five conditions hold: same run, same currency, within `WINDOW_MS`, non-zero and
-  equal and opposite in minor units, different resolved Actual account ids, and mutual uniqueness.
+  only where all five conditions hold: same in-scope batch, same currency, within `WINDOW_MS`,
+  non-zero and equal and opposite in minor units, different resolved Actual account ids, and mutual
+  uniqueness. In scope means after the reconciliation floor, so a pair the floor splits is not
+  booked as a transfer — though a second pairing pass over the unfiltered rows still counts the
+  missing leg as evidence, which is what stops the survivor inventing one from its payee.
   Four things that are therefore still manual. Legs that arrive in *different* runs cannot pair at
   all, since a source down for a run separates them. **Cross-currency transfers are not detected**,
   since two legs in different currencies are not equal and opposite and identifying the pair would

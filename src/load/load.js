@@ -207,11 +207,14 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   // was left unlinked. Unlinked rather than joined up, because linking would mean editing
   // transactions already in the budget.
   //
-  // Known gap, deliberately not solved: this tests CURRENT ids only. A leg sitting under a
-  // pre-account legacy id is invisible here, so the pair is kept, written, and then dropped by
-  // the legacy check in the dedupe — the same loss, unreported. The window is narrow: legacy
-  // ids stopped being written on 2026-08-06 and no row below the reconciliation floor is in
-  // scope to collide.
+  // Known gap, deliberately not solved: this tests CURRENT ids only, so a leg sitting under a
+  // pre-account legacy id is invisible here and the pair is kept and written. What happens next
+  // depends on WHICH leg, because the dedupe's legacy check only ever consults the written
+  // account's set. Out leg: the transfer is filtered there, the leg is dropped, and nothing is
+  // reported — a loss. Into leg: nothing looks in that account at all, so the transfer is
+  // written, Actual mirrors a credit beside the legacy row, and the into account is DOUBLED.
+  // The window is narrow either way: legacy ids stopped being written on 2026-08-06 and no row
+  // below the reconciliation floor is in scope to collide.
   // One idea, two sources: a row with ANY evidence of a counterpart may not invent a leg from
   // its payee. A licence is a claim about a bank; a row is that bank's own behaviour, and
   // behaviour beats a claim. Contested rows seed the set — pairing refused them for having two
@@ -223,6 +226,30 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   // search for an opposing row that was deliberately declined; this uses only evidence pairRows
   // has already computed.
   const refused = new Set(contested);
+
+  // A second pairing pass over ALL rows, not just the in-scope ones, purely for evidence.
+  // pairRows above runs on `scoped`, so a counter-leg on or below the reconciliation floor is
+  // invisible to it: the surviving leg has no partner, is not contested, and walks into the
+  // payee path to invent a leg beside money that is already booked. The trigger is not an edge
+  // case — re-piping an archive from runs/ after the floor has moved past part of it splits a
+  // pair across the floor, and the README tells you to concatenate and re-pipe archives.
+  //
+  // Evidence ONLY. Nothing here changes which rows are written: a row below the floor is still
+  // skipped, and a pair straddling the floor is still not booked as a transfer. It widens
+  // `refused`, so the licence stands down where a counterpart demonstrably exists.
+  //
+  // ponytail: a second quadratic pass over a batch of tens of rows, which is nothing at this
+  // size against a silent doubling. If batches ever grow, index candidates by currency and
+  // absolute minor amount instead of comparing every row with every other.
+  const inScopeIds = new Set(scoped.map((r) => r.id));
+  const all = canTransfer ? pairRows(rows, mapping) : { pairs: [], contested: new Set() };
+  for (const id of all.contested) refused.add(id);
+  for (const { out, into } of all.pairs) {
+    if (inScopeIds.has(out.id) !== inScopeIds.has(into.id)) {
+      refused.add(out.id);
+      refused.add(into.id);
+    }
+  }
   const booked = pairs.filter(({ out, into }) => {
     if (seen.has(`${out.id}+${into.id}`)) return true;
     if (!seen.has(out.id) && !seen.has(into.id)) return true;
@@ -278,13 +305,15 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
       // Ungated, it doubled money. A debit naming its target got a transfer, Actual mirrored a
       // credit into that target, and the target's own inbound alert then imported as a third
       // row: the money arrived twice. Pairing alone does not save you, because pairing refuses
-      // whenever it is not certain, and a refusal used to drop straight through to here. Two of
-      // those refusals no longer do — `refused` above bars the legs of a budget-refused pair and
-      // every contested row — but a counter-leg pairing never treated as a candidate at all
-      // still does: further apart than WINDOW_MS, or a different currency. Nor is one run the
-      // boundary: a source down for a run (SOURCE FAILED in runs/run.log) separates the two legs
-      // into different runs, where they can never pair at all. Those are the cases the licence
-      // is still carrying alone, which is why it has to be a measurement.
+      // whenever it is not certain, and a refusal used to drop straight through to here. Those
+      // refusals no longer do: `refused` above bars the legs of a budget-refused pair, every
+      // contested row, and both legs of a pair the reconciliation floor splits. What still falls
+      // through is a counter-leg pairing never treated as a CANDIDATE, and there are four ways
+      // to be that — further apart than WINDOW_MS, a different currency, a pot transfer (which
+      // pairRows excludes from `eligible`, since pot moves have their own branch above), or a
+      // different run, because a source down for a run (SOURCE FAILED in runs/run.log) separates
+      // the legs into batches that never meet. Those four are what the licence carries alone,
+      // which is why it has to be a measurement.
       //
       // So the list is the licence, and it is a measurement rather than an opinion. UOB was
       // checked on 2026-08-27: a transfer into it produced a debit alert from the sending bank
