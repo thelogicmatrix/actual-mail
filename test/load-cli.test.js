@@ -34,6 +34,15 @@ writeFileSync(MAPPING_EMPTY, JSON.stringify({
   card: '00000000-0000-0000-0000-00000000000b',
 }));
 
+// A `no-inbound-alert:` licence whose bare account key is absent. loadRows resolves a
+// payee-named account through the ordinary key first, so this licence can never fire: the entry
+// looks live in the file and silently does nothing.
+const MAPPING_ORPHAN_LICENCE = join(TMP, 'mapping-orphan-licence.json');
+writeFileSync(MAPPING_ORPHAN_LICENCE, JSON.stringify({
+  card: '00000000-0000-0000-0000-00000000000b',
+  'no-inbound-alert:0000': '00000000-0000-0000-0000-00000000000a',
+}));
+
 // A valid row, dated well after any floor these tests set.
 const ROW = {
   id: 'row-1', source: 'trust', account: '0000', date: '2026-07-28T07:24:00+08:00',
@@ -161,6 +170,29 @@ test('a missing mapping key is counted on stderr and named only on stdout', () =
   assert.ok(!r.stderr.includes('Holiday Pot'), 'a pot name must not reach the alert body');
   assert.match(r.stdout, /0000/);
   assert.match(r.stdout, /pot:Holiday Pot/);
+});
+
+test('an inert no-inbound-alert licence warns, names its key only on stdout, and still imports', () => {
+  // Adding `no-inbound-alert:<key>` without `<key>` itself leaves the licence unreachable, so
+  // transfers into that account quietly stop being detected while every run reports healthy.
+  // It warns rather than refusing: an inert licence loses a link, not money, and stopping the
+  // run would cost real imports. Same leak rule as the missing-key check above — the key is
+  // account digits, so it goes to stdout only.
+  const r = run([{ ...ROW, account: 'card' }], {
+    ACTUAL_MAIL_MAPPING: MAPPING_ORPHAN_LICENCE,
+    ACTUAL_MAIL_RECONCILED_THROUGH: '2020-01-01',
+  }, { stub: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /1 inert|is not in the mapping/);
+  assert.ok(!r.stderr.includes('0000'), 'account digits must not reach the alert body');
+  assert.match(r.stdout, /no-inbound-alert:0000/);
+  assert.match(r.stderr, /1 row\(s\)/, 'the run still imports');
+});
+
+test('a complete mapping says nothing about licences', () => {
+  const r = run([ROW], { ACTUAL_MAIL_RECONCILED_THROUGH: '2020-01-01' }, { stub: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(!/inert/.test(r.stderr), 'no warning when there is nothing to warn about');
 });
 
 test('a mapping path that does not exist says so, rather than throwing ENOENT', () => {

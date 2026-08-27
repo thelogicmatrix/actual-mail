@@ -34,7 +34,11 @@ export function inScope(rows, reconciledThrough = null) {
 // alert. Same convention as `pot:`, and it lives in mapping.json for a reason beyond tidiness —
 // the entries name real account keys, and every account digit in a committed file must be 0000.
 // See mapping.example.json for the shape.
-const NO_INBOUND_ALERT = 'no-inbound-alert:';
+//
+// Exported so bin/actual-mail-load.js's orphan-licence warning cannot drift from the prefix
+// this file actually honours: a mismatched copy there would warn about nothing while real
+// orphan licences stayed silent, which is the failure the warning exists to catch.
+export const NO_INBOUND_ALERT = 'no-inbound-alert:';
 
 export function fxDatesFor(rows, base = baseCurrency()) {
   return rows.filter((r) => r.currency !== base).map((r) => sgDay(r.date));
