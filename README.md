@@ -275,6 +275,12 @@ beside the leg already created here and the money arrives twice. So the entry is
 you give it by checking: move a small amount in, and confirm nothing arrives from the receiving
 bank while the sending bank's alert does. Without the entry, such a payee is just a payee.
 
+`<key>` must also be a key in its own right. A `no-inbound-alert:<key>` with no `<key>` beside
+it is unreachable — the payee is resolved through the ordinary key first — so the licence does
+nothing and transfers into that account quietly go back to being ordinary spends. The loader
+warns at the start of every run when it finds one, counting them on stderr and naming them on
+stdout, and imports anyway: an inert licence loses a link, not money.
+
 Pot moves are written as **two-sided transfers** rather than spends. The row's payee becomes
 the target account's transfer payee, so the money leaves one account and arrives in the other
 instead of vanishing into a category.
