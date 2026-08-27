@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { toActualTxn, toMinorUnits, loadRows, sgDay, inScope, fxDatesFor } from '../../src/load/load.js';
+import { toActualTxn, loadRows, sgDay, inScope, fxDatesFor } from '../../src/load/load.js';
 import { makeRateLookup, DEFAULT_MARKUP } from '../../src/load/fx.js';
-import { rowId } from '../../src/row.js';
+import { rowId, toMinorUnits } from '../../src/row.js';
 
 // ROW is an SGD row, so every test built on it describes DEFAULT base-currency behaviour.
 // Pinned rather than inherited: a non-SGD adopter with BASE_CURRENCY exported would

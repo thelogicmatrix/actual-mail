@@ -1,12 +1,5 @@
 import { baseCurrency } from './fx.js';
-import { rowId } from '../row.js';
-
-export function toMinorUnits(decimalString) {
-  const negative = decimalString.startsWith('-');
-  const [whole, frac = '0'] = decimalString.replace('-', '').split('.');
-  const minor = Number(whole) * 100 + Number(frac.padEnd(2, '0').slice(0, 2));
-  return negative ? -minor : minor;
-}
+import { rowId, toMinorUnits } from '../row.js';
 
 // Trust alerts carry an SGT offset (`...+08:00`), the Wise API answers in UTC (`...Z`), and
 // the calendar day used to be taken off the front of whichever string arrived. That booked
