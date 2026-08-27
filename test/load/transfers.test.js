@@ -134,3 +134,16 @@ test('a payee naming no account at all resolves to null', () => {
   assert.equal(namedAccount(row({ payee: 'Topped up account' }), { '0000': 'ACCT_B' }), null);
   assert.equal(namedAccount(row({ payee: 'WISE ASIA-PACIFIC PTE LTD' }), { '0000': 'ACCT_B' }), null);
 });
+
+test('contested names the rows that ambiguous counts, so the two cannot drift', () => {
+  const a = row({ id: 'a', account: 'uob', amount: '-50.00' });
+  const b = row({ id: 'b', account: 'main', amount: '50.00' });
+  const c = row({ id: 'c', account: 'main', amount: '50.00' });
+  const { ambiguous, contested } = pairRows([a, b, c], MAPPING);
+  // loadRows bars a contested row from inventing a transfer leg off its payee, so the SET is
+  // what protects money while the count is only what the run line prints. They come off the
+  // same events and are pinned together here.
+  assert.equal(contested.size, 3);
+  assert.equal(contested.size, ambiguous);
+  assert.deepEqual([...contested].sort(), ['a', 'b', 'c']);
+});

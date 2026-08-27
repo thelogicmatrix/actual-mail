@@ -188,9 +188,9 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
     seenInAccount.set(accountId, local);
   }
 
-  const { pairs, ambiguous } = canTransfer
+  const { pairs, ambiguous, contested } = canTransfer
     ? pairRows(scoped, mapping)
-    : { pairs: [], ambiguous: 0 };
+    : { pairs: [], ambiguous: 0, contested: new Set() };
 
   // A pair is only a pair against what the budget ALREADY holds, which is why the read above
   // happens first. Refusing a pair outright used to take the new leg down with it: the monthly
@@ -212,18 +212,25 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   // the legacy check in the dedupe — the same loss, unreported. The window is narrow: legacy
   // ids stopped being written on 2026-08-06 and no row below the reconciliation floor is in
   // scope to collide.
-  const refused = new Set();
+  // One idea, two sources: a row with ANY evidence of a counterpart may not invent a leg from
+  // its payee. A licence is a claim about a bank; a row is that bank's own behaviour, and
+  // behaviour beats a claim. Contested rows seed the set — pairing refused them for having two
+  // candidates, which is more evidence of a counterpart than a pair, not less — and the legs of
+  // budget-refused pairs are added below.
+  //
+  // What still falls through is a counter-leg pairing never considered a candidate at all:
+  // further apart than WINDOW_MS, or a different currency. Closing that would mean the general
+  // search for an opposing row that was deliberately declined; this uses only evidence pairRows
+  // has already computed.
+  const refused = new Set(contested);
   const booked = pairs.filter(({ out, into }) => {
     if (seen.has(`${out.id}+${into.id}`)) return true;
     if (!seen.has(out.id) && !seen.has(into.id)) return true;
     transfersAlreadySeparate += 1;
     // BOTH legs, because refusing the pair also drops them out of `pairedOut`, and a row with
     // no partner falls through to the payee path below and may invent a leg into the very
-    // account whose real row is sitting in this same batch. The licence there claims a bank
-    // sends no inbound alert; a row that PAIRS with this one is that bank contradicting the
-    // licence, so the row wins and the licence is not applied. This is not a search for an
-    // opposing row — pairRows already found these two and we refused them over budget state,
-    // not over evidence. Ignoring evidence already in hand would be the indefensible part.
+    // account whose real row is sitting in this same batch. We refused these two over budget
+    // state, not over evidence: pairRows had already identified them as one movement.
     refused.add(out.id);
     refused.add(into.id);
     return false;
@@ -270,11 +277,14 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
       //
       // Ungated, it doubled money. A debit naming its target got a transfer, Actual mirrored a
       // credit into that target, and the target's own inbound alert then imported as a third
-      // row: the money arrived twice. Pairing does not save you, because pairing refuses
-      // whenever it is not certain — more than one candidate, legs further apart than
-      // WINDOW_MS, or a currency mismatch — and every refusal drops straight through to here.
-      // Nor is one run the boundary: a source down for a run (SOURCE FAILED in runs/run.log)
-      // separates the two legs into different runs, where they can never pair at all.
+      // row: the money arrived twice. Pairing alone does not save you, because pairing refuses
+      // whenever it is not certain, and a refusal used to drop straight through to here. Two of
+      // those refusals no longer do — `refused` above bars the legs of a budget-refused pair and
+      // every contested row — but a counter-leg pairing never treated as a candidate at all
+      // still does: further apart than WINDOW_MS, or a different currency. Nor is one run the
+      // boundary: a source down for a run (SOURCE FAILED in runs/run.log) separates the two legs
+      // into different runs, where they can never pair at all. Those are the cases the licence
+      // is still carrying alone, which is why it has to be a measurement.
       //
       // So the list is the licence, and it is a measurement rather than an opinion. UOB was
       // checked on 2026-08-27: a transfer into it produced a debit alert from the sending bank

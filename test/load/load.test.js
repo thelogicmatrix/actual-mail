@@ -887,3 +887,37 @@ test('neither leg of a refused pair may invent a transfer from its payee', async
   assert.equal(b.written.get('ACCT_A')[0].payee_name, 'A/C ending 0000');
   assert.equal(b.written.get('ACCT_B').length, 1);
 });
+
+test('a contested row may not invent a transfer leg from its payee', async () => {
+  // Two candidates is more evidence of a counterpart than one, not less. The row satisfies every
+  // pairing rule and is refused only for ambiguity, so it never became a pair — and it used to
+  // fall through to the licence and book an invented leg into the very account both candidates
+  // came from, while they imported beside it.
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'solo', account: 'main', amount: '-700.00', payee: 'A/C ending 0000' }),
+     xrow({ id: 'c1', account: 'uob', amount: '700.00' }),
+     xrow({ id: 'c2', account: 'uob', amount: '700.00' })],
+    XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.transfers, 0, 'contested, so the licence does not apply');
+  assert.equal(r.ambiguous, 3);
+  assert.equal(api.written.get('ACCT_A')[0].payee_name, 'A/C ending 0000');
+  assert.equal(api.written.get('ACCT_A')[0].payee, undefined, 'no invented far leg');
+  assert.equal(api.written.get('ACCT_B').length, 2, 'both candidates import as ordinary rows');
+});
+
+test('a licensed row with no candidate at all still books its transfer', async () => {
+  // The over-tightening check. Trust-to-UOB is the case the licence exists for: one row, no
+  // counterpart anywhere, and the far side is only bookable from the payee.
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'solo', account: 'main', amount: '-1.37', payee: 'A/C ending 0000' }),
+     xrow({ id: 'other', account: 'card', amount: '-9.99', payee: 'TEST MERCHANT SG' })],
+    XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.transfers, 1);
+  assert.equal(r.ambiguous, 0);
+  assert.equal(api.written.get('ACCT_A').find((t) => t.imported_id === 'xsolo').payee,
+    'payee-of-ACCT_B');
+});

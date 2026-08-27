@@ -64,6 +64,11 @@ export function pairRows(rows, mapping) {
   const pairs = [];
   const paired = new Set();
   let ambiguous = 0;
+  // The same events as `ambiguous`, as ids rather than a count. `ambiguous` stays a number
+  // because the run line prints it and its meaning is pinned; loadRows needs to know WHICH rows
+  // were contested, because a row with two candidates has evidence of a counterpart and must
+  // not be allowed to invent one from its payee.
+  const contested = new Set();
 
   for (const a of eligible) {
     if (paired.has(a.id)) continue;
@@ -72,9 +77,13 @@ export function pairRows(rows, mapping) {
     // Ambiguity is refused, never guessed. Uniqueness has to be MUTUAL: A having exactly one
     // candidate means nothing if that candidate has three, because then choosing A is a
     // coin toss that hides two real transactions.
-    if (list.length > 1) { ambiguous += 1; continue; }
+    if (list.length > 1) { ambiguous += 1; contested.add(a.id); continue; }
     const b = list[0];
-    if (paired.has(b.id) || candidates.get(b.id).length !== 1) { ambiguous += 1; continue; }
+    if (paired.has(b.id) || candidates.get(b.id).length !== 1) {
+      ambiguous += 1;
+      contested.add(a.id);
+      continue;
+    }
 
     paired.add(a.id);
     paired.add(b.id);
@@ -82,5 +91,5 @@ export function pairRows(rows, mapping) {
     pairs.push({ out, into: out === a ? b : a });
   }
 
-  return { pairs, ambiguous };
+  return { pairs, ambiguous, contested };
 }
