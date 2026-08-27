@@ -199,33 +199,65 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   let imported = 0;
   let alreadyPresent = 0;
   try {
-    for (const [accountId, txns] of byAccount) {
-      const dates = txns.map((t) => t.date).sort();
-      // Split on '+', because a transfer's imported_id joins the ids of BOTH rows it stands
-      // for. Reading it back as one opaque string would let either leg re-import: the leg
-      // Actual mirrored for us carries no imported_id at all, so the joined id is the only
-      // record that its row was ever seen. A sha256 hex digest never contains '+'.
-      //
-      // The joined id goes in WHOLE as well as in parts. Nothing matches it — a part and a
-      // legacy id are both single digests — so it costs nothing, and it is what lets the
-      // filter below tell an already-written transfer apart from a pair whose legs are in the
-      // budget separately. Without it that test reads `!seen.has(whole)` against a set that
-      // can only ever hold parts, and every healthy re-run reports a phantom split pair.
-      const seen = new Set();
+    // Split on '+', because a transfer's imported_id joins the ids of BOTH rows it stands for.
+    // Reading it back as one opaque string would let either leg re-import. The joined id goes
+    // into the set WHOLE as well as in parts: nothing can match it — a part and a legacy id
+    // are both single digests — but it is what lets the filter below tell an already-written
+    // transfer apart from a pair whose legs are in the budget separately, and without it every
+    // healthy re-run of every transfer reported a phantom split pair. A sha256 hex digest
+    // never contains '+'.
+    //
+    // Read RUN-WIDE, before the first write, because a transfer's record lives in only ONE of
+    // the two accounts it spans: the written leg carries the joined id and the leg Actual
+    // mirrors for us carries no imported_id at all. Deduping a batch against its own account
+    // alone therefore looked in the wrong place for the mirrored side, and the credit leg was
+    // written a second time on top of money already booked. Both orderings reach it — the pair
+    // first and then the credit leg alone, or the credit leg alone and then the pair — and
+    // neither needs a re-piped file: SOURCE FAILED lines in runs/run.log mean one source being
+    // down for a run is a path this system has already taken.
+    //
+    // CURRENT ids union run-wide, LEGACY ids stay per account, and that split is deliberate. A
+    // row id hashes the account, so the same id under another account means that row was
+    // written there under an earlier mapping and suppressing it is right — the money is booked,
+    // just where the old mapping pointed. A legacy id hashes only source and raw_ref, so a
+    // run-wide legacy match would re-open the loss recorded above legacyIds: one Wise balance
+    // conversion appears in both balance statements under a single referenceNumber, so its two
+    // legs share one legacy id, and where those balances map to different Actual accounts the
+    // second leg would silently vanish as already present.
+    const dates = [...byAccount.values()].flat().map((t) => t.date).sort();
+    const seen = new Set();
+    const seenInAccount = new Map();
+    // One read per MAPPED account, not per written-to account: an account with nothing to write
+    // this run is exactly where a mirrored leg hides. No rows means no reads at all, rather than
+    // asking the API for a date range this run has no dates for. The reads stay inside this try
+    // so the catch below still covers a getTransactions failure — and now that they all happen
+    // before the first write, such a failure leaves nothing written to sync.
+    for (const accountId of dates.length ? new Set(Object.values(mapping).filter(Boolean)) : []) {
+      const local = new Set();
       for (const t of await api.getTransactions(accountId, dates[0], dates.at(-1))) {
         if (!t.imported_id) continue;
-        seen.add(String(t.imported_id));
-        for (const part of String(t.imported_id).split('+')) seen.add(part);
+        const id = String(t.imported_id);
+        local.add(id);
+        seen.add(id);
+        for (const part of id.split('+')) { local.add(part); seen.add(part); }
       }
+      seenInAccount.set(accountId, local);
+    }
+
+    for (const [accountId, txns] of byAccount) {
+      const legacySeen = seenInAccount.get(accountId) ?? new Set();
       // The predicate ADDS to `seen`, which is what makes the filter dedupe the incoming batch
       // against ITSELF as well as against the account. Two rows carrying one imported_id were
       // both written before that: the account had neither yet, so neither was "already present".
       // Reachable by concatenating two archives from runs/, re-piping a file, or any upstream
-      // double-delivery. The second `seen.has` is the pre-account id — see legacyIds above.
+      // double-delivery. It adds to the RUN-WIDE set, so a doubled batch dedupes against itself
+      // across accounts too. The second test is the pre-account id, and it is the one thing
+      // compared against this account alone — see legacyIds above and the split explained at
+      // the fetch.
       const fresh = txns.filter((t) => {
         const parts = String(t.imported_id).split('+');
         const legacy = legacyIds.get(t.imported_id) ?? [];
-        if (parts.some((p) => seen.has(p)) || legacy.some((l) => seen.has(l))) {
+        if (parts.some((p) => seen.has(p)) || legacy.some((l) => legacySeen.has(l))) {
           // A pair whose legs were each imported separately by earlier runs. Both parts are
           // already in the budget as ordinary transactions, so writing the transfer now
           // would be a third copy of the same money. Reported rather than linked: linking

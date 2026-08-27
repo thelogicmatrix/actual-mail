@@ -687,3 +687,58 @@ test('a healthy re-run of a booked transfer is not reported as a split pair', as
   assert.equal(second.transfersAlreadySeparate, 0);
   assert.equal(second.alreadyPresent, 1, 'still counted as already present, just not as split');
 });
+
+test('the credit leg arriving alone after the pair cannot re-import', async () => {
+  // The joined id sits on the WRITTEN leg, in the debit account. The suppressed credit leg
+  // belongs to the other account, where Actual's mirror carries no imported_id at all, so a
+  // dedupe reading only that account found nothing and wrote the money a second time.
+  const api = sink();
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+  await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  const again = await loadRows(
+    [xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  assert.equal(again.imported, 0);
+  assert.equal((api.written.get('ACCT_A') ?? []).length, 0,
+    'the credit side is Actual\'s mirror leg to create, never ours to write');
+});
+
+test('a leg already in another account blocks the transfer, and is reported', async () => {
+  // Run one: only the credit source was up, so that leg imported as an ordinary transaction
+  // into its own account. SOURCE FAILED in runs/run.log makes this the ordinary shape of a
+  // single-source outage, not an exotic replay. Run two sees both legs and pairs them, and the
+  // written leg goes to the DEBIT account, which has never held either id.
+  const api = sink();
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+  await loadRows([xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  const paired = await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  assert.equal(paired.imported, 0, 'writing it would mirror a second credit onto the same money');
+  assert.equal(paired.transfersAlreadySeparate, 1);
+});
+
+test('a legacy id is matched per account, never run-wide', async () => {
+  // The case the run-wide union must NOT swallow. A legacy id hashes source and raw_ref with
+  // no account, so two rows can share one: a Wise balance conversion appears in both balance
+  // statements under a single referenceNumber. Where those balances map to different Actual
+  // accounts, a run-wide legacy match would drop the second leg as already present — the exact
+  // silent loss recorded above legacyIds in load.js.
+  const api = sink();
+  const shared = rowId('trust', '<shared>');
+  // ACCT_A already holds one of them, under its pre-account id.
+  api.written.set('ACCT_A', [{ imported_id: shared, amount: -137, date: '2026-08-27' }]);
+  const r = await loadRows(
+    [xrow({ id: 'a', account: 'main', amount: '-1.37', raw_ref: '<shared>' }),
+     xrow({ id: 'b', account: 'uob', amount: '-1.37', raw_ref: '<shared>' })],
+    XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.alreadyPresent, 1, 'the ACCT_A row is the one already in the budget');
+  assert.equal(r.imported, 1, 'the ACCT_B row shares only the legacy id, and is a different row');
+  assert.equal(api.written.get('ACCT_B').length, 1);
+});
