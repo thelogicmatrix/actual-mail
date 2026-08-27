@@ -255,13 +255,25 @@ check. It lists every missing key at once.
   "main": "<actual account id>",
   "0000": "<actual account id>",
   "wise-sgd": "<actual account id>",
-  "pot:Buffer": "<actual account id>"
+  "pot:Buffer": "<actual account id>",
+  "no-inbound-alert:0000": "<actual account id>"
 }
 ```
 
-Four shapes appear there, and `mapping.example.json` shows all of them: a named account a
+Five shapes appear there, and `mapping.example.json` shows all of them: a named account a
 parser chose (`card`, `main`), the last four digits of an account the alert email quoted, a
-Wise currency balance (`wise-<currency>` in lower case), and `pot:<Pot Name>` for a savings pot.
+Wise currency balance (`wise-<currency>` in lower case), `pot:<Pot Name>` for a savings pot,
+and `no-inbound-alert:<key>` described below.
+
+`no-inbound-alert:<key>` records one measurement: **that bank sends you no alert when money
+arrives.** Its value is the same account id `<key>` itself maps to.
+
+An alert whose payee names one of your own accounts ("A/C ending 0000") describes both sides of
+a transfer in one email, and this is what lets the far side be booked from it. That is only
+safe where the receiving bank cannot send an alert of its own — otherwise its alert imports
+beside the leg already created here and the money arrives twice. So the entry is a licence, and
+you give it by checking: move a small amount in, and confirm nothing arrives from the receiving
+bank while the sending bank's alert does. Without the entry, such a payee is just a payee.
 
 Pot moves are written as **two-sided transfers** rather than spends. The row's payee becomes
 the target account's transfer payee, so the money leaves one account and arrives in the other

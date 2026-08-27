@@ -30,6 +30,12 @@ export function inScope(rows, reconciledThrough = null) {
   return rows.filter((r) => !reconciledThrough || sgDay(r.date) > reconciledThrough);
 }
 
+// The mapping key prefix that records a measurement: this account's bank sends no inbound
+// alert. Same convention as `pot:`, and it lives in mapping.json for a reason beyond tidiness —
+// the entries name real account keys, and every account digit in a committed file must be 0000.
+// See mapping.example.json for the shape.
+const NO_INBOUND_ALERT = 'no-inbound-alert:';
+
 export function fxDatesFor(rows, base = baseCurrency()) {
   return rows.filter((r) => r.currency !== base).map((r) => sgDay(r.date));
 }
@@ -115,6 +121,12 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   // A caller that cannot resolve transfer payees degrades to ordinary transactions rather
   // than throwing. bin/actual-mail-load.js always supplies one.
   const canTransfer = typeof transferPayeeFor === 'function';
+  // Accounts whose bank was MEASURED to send no inbound alert, and nothing else. Named rather
+  // than inferred, so adding one is a deliberate act — the same shape as NO_SPREAD_SOURCES in
+  // fx.js, and for the same kind of reason: an exemption that is only true because somebody
+  // went and checked.
+  const noInboundAlert = new Set(Object.keys(mapping)
+    .filter((k) => k.startsWith(NO_INBOUND_ALERT)).map((k) => k.slice(NO_INBOUND_ALERT.length)));
   const { pairs, ambiguous } = canTransfer
     ? pairRows(scoped, mapping)
     : { pairs: [], ambiguous: 0 };
@@ -153,11 +165,28 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
       txn.payee = transferPayeeFor(potAccountId);
     } else if (canTransfer) {
       // Two ways to know this row is an internal transfer, and both are needed because the
-      // banks are asymmetric. A paired partner row is the evidenced case. A payee naming one
-      // of your own accounts is the only case that works when the receiving bank sends no
-      // alert at all, which UOB was verified to do on 2026-08-27.
+      // banks are asymmetric. A paired partner row is the evidenced case: two rows, one
+      // movement. A payee naming one of your own accounts is the other, and it INVENTS the far
+      // leg from a string — which is safe only where the receiving bank cannot produce a row of
+      // its own to be booked beside it.
+      //
+      // Ungated, it doubled money. A debit naming its target got a transfer, Actual mirrored a
+      // credit into that target, and the target's own inbound alert then imported as a third
+      // row: the money arrived twice. Pairing does not save you, because pairing refuses
+      // whenever it is not certain — more than one candidate, legs further apart than
+      // WINDOW_MS, or a currency mismatch — and every refusal drops straight through to here.
+      // Nor is one run the boundary: a source down for a run (SOURCE FAILED in runs/run.log)
+      // separates the two legs into different runs, where they can never pair at all.
+      //
+      // So the list is the licence, and it is a measurement rather than an opinion. UOB was
+      // checked on 2026-08-27: a transfer into it produced a debit alert from the sending bank
+      // and nothing from UOB, still nothing seven minutes later, against outbound alerts that
+      // normally arrive within thirty seconds. Adding an account here means making that same
+      // measurement. A named account without one is an ordinary payee, exactly as an unmapped
+      // account key already is.
       const partner = pairedOut.get(row.id);
-      const targetKey = partner ? partner.account : namedAccount(row, mapping);
+      const named = partner ? null : namedAccount(row, mapping);
+      const targetKey = partner ? partner.account : (noInboundAlert.has(named) ? named : null);
       const targetId = targetKey ? mapping[targetKey] : null;
       // A payee naming the row's OWN account is not a transfer, it is a note to self.
       if (targetId && targetId !== accountId) {

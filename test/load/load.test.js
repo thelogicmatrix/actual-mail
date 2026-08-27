@@ -525,7 +525,14 @@ test('two rows carrying one imported_id are written once', () => {
 
 // --- internal transfers -------------------------------------------------------------------
 
-const XFER_MAPPING = { uob: 'ACCT_B', main: 'ACCT_A', card: 'ACCT_A', '0000': 'ACCT_B' };
+// 'no-inbound-alert:0000' is the licence for the payee path: ACCT_B's bank was measured to
+// send no inbound alert, so a row naming it cannot be contradicted by a row from that bank.
+// Its VALUE is the same account id '0000' maps to, because the dedupe prefetch iterates
+// Object.values(mapping) and a marker value would be handed to getTransactions as an account.
+const XFER_MAPPING = { uob: 'ACCT_B', main: 'ACCT_A', card: 'ACCT_A', '0000': 'ACCT_B',
+  'no-inbound-alert:0000': 'ACCT_B' };
+// The same accounts with no licence recorded. A payee naming '0000' here is an ordinary payee.
+const UNLICENSED = { uob: 'ACCT_B', main: 'ACCT_A', card: 'ACCT_A', '0000': 'ACCT_B' };
 const xferPayee = (accountId) => `payee-of-${accountId}`;
 
 const xrow = (over) => ({
@@ -785,4 +792,34 @@ test('a transfer is counted and reported when it is WRITTEN, not when it is dete
   assert.equal(second.transfers, 0, 'nothing was written, so no transfer was made');
   assert.equal(second.alreadyPresent, 1, 'it is still counted as already present');
   assert.equal(seen.length, 1, 'and the run log is not told about it a second time');
+});
+
+test('a payee naming an account with no recorded licence is an ordinary payee', async () => {
+  // Inventing the far leg from a payee string is only safe where the receiving bank cannot
+  // send a row of its own. Without that measurement recorded, the payee is just a payee.
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'solo', account: 'main', amount: '-1.37', payee: 'A/C ending 0000' })],
+    UNLICENSED, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.transfers, 0);
+  assert.equal(api.written.get('ACCT_A')[0].payee_name, 'A/C ending 0000');
+  assert.equal(api.written.get('ACCT_B'), undefined, 'no leg is invented in the target account');
+});
+
+test('an unlicensed payee target does not double when the real counter-leg arrives', async () => {
+  // The reproduction. The debit names the target, and the target's own bank DID send a row —
+  // nine minutes later, so pairing refuses it and the payee path would have invented a second
+  // leg beside it. Two ordinary transactions, and ACCT_B holds the money once.
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'out', account: 'main', amount: '-1.37', payee: 'A/C ending 0000' }),
+     xrow({ id: 'in', account: 'uob', amount: '1.37', date: '2026-08-27T13:20:00+08:00' })],
+    UNLICENSED, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.imported, 2);
+  assert.equal(r.transfers, 0);
+  assert.equal(r.ambiguous, 0, 'pairing refused it silently — nine minutes is outside the window');
+  assert.equal(api.written.get('ACCT_B').length, 1, 'the counter-leg, once');
+  assert.equal(api.written.get('ACCT_B')[0].amount, 137);
 });
