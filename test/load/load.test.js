@@ -538,7 +538,12 @@ function sink() {
   const written = new Map();
   return {
     written,
-    getTransactions: async (accountId) => written.get(accountId) ?? [],
+    // The bounds are HONOURED, not ignored. A sink that returns everything regardless of the
+    // range means no test exercises the read window at all, and every assertion here would pass
+    // just as well if the range were per-account, reversed or undefined — which is exactly how
+    // a pair straddling midnight SGT got to read the wrong days.
+    getTransactions: async (accountId, start, end) =>
+      (written.get(accountId) ?? []).filter((t) => t.date >= start && t.date <= end),
     addTransactions: async (accountId, txns) => {
       written.set(accountId, [...(written.get(accountId) ?? []), ...txns]);
     },
@@ -741,4 +746,43 @@ test('a legacy id is matched per account, never run-wide', async () => {
   assert.equal(r.alreadyPresent, 1, 'the ACCT_A row is the one already in the budget');
   assert.equal(r.imported, 1, 'the ACCT_B row shares only the legacy id, and is a different row');
   assert.equal(api.written.get('ACCT_B').length, 1);
+});
+
+test('a pair straddling midnight SGT reads BOTH days, so the earlier leg is still found', async () => {
+  // The read window came off the written transactions, which by construction exclude the
+  // suppressed leg. Two legs thirty seconds apart can still fall on different Singapore days,
+  // and then the window covered only the written leg's day: right accounts, wrong dates, and
+  // the duplicate this dedupe exists to stop came straight back.
+  const api = sink();
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+  const credit = xrow({ id: 'in', account: 'main', amount: '700.00',
+    date: '2026-08-27T23:59:45+08:00' });
+  const debit = xrow({ id: 'out', account: 'uob', amount: '-700.00',
+    date: '2026-08-28T00:00:15+08:00' });
+  // Run one: only the credit source was up, so it books standalone, dated the 27th.
+  await loadRows([credit], XFER_MAPPING, api, () => null, opts);
+  assert.equal(api.written.get('ACCT_A')[0].date, '2026-08-27');
+  // Run two: both legs pair, and the written leg is the debit, dated the 28th.
+  const paired = await loadRows([debit, credit], XFER_MAPPING, api, () => null, opts);
+  assert.equal(paired.imported, 0, 'the credit leg is already in the budget, a day earlier');
+  assert.equal(paired.transfersAlreadySeparate, 1);
+});
+
+test('a transfer is counted and reported when it is WRITTEN, not when it is detected', async () => {
+  // Detection happens in the row loop, the write happens after the dedupe. Counting at
+  // detection made every re-run report a transfer on a run that wrote nothing — a repeated
+  // alarm about money, which teaches the reader to stop reading the run line.
+  const api = sink();
+  const seen = [];
+  const rows = [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+                xrow({ id: 'in', account: 'main', amount: '700.00' })];
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee,
+    onTransfer: (t) => seen.push(t) };
+  const first = await loadRows(rows, XFER_MAPPING, api, () => null, opts);
+  assert.equal(first.transfers, 1);
+  assert.equal(seen.length, 1);
+  const second = await loadRows(rows, XFER_MAPPING, api, () => null, opts);
+  assert.equal(second.transfers, 0, 'nothing was written, so no transfer was made');
+  assert.equal(second.alreadyPresent, 1, 'it is still counted as already present');
+  assert.equal(seen.length, 1, 'and the run log is not told about it a second time');
 });

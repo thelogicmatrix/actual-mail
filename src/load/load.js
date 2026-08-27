@@ -122,6 +122,9 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   // The written leg's target and partner, and the set of legs Actual will create for us.
   const pairedOut = new Map(pairs.map(({ out, into }) => [out.id, into]));
   const suppressed = new Set(pairs.map(({ into }) => into.id));
+  // Keyed by the transaction OBJECT, not its imported_id: two rows in one batch can carry one
+  // id, and the object is what the dedupe filter hands back.
+  const transferTo = new Map();
 
   for (const row of scoped) {
     // The mirror of this leg is created by Actual from the other side, so writing it here
@@ -163,8 +166,11 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
         // Both ids, so the leg Actual creates for us — which carries no imported_id of its
         // own — cannot come back as a standalone duplicate on the next run.
         if (partner) txn.imported_id = `${row.id}+${partner.id}`;
-        transfers += 1;
-        onTransfer({ date: txn.date, amount: txn.amount, from: accountId, to: targetId });
+        // Recorded here, COUNTED after the dedupe. This loop only detects; whether anything is
+        // written is decided by the filter below. Counting here made a re-run that wrote
+        // nothing still report a transfer and fire onTransfer again — an alarm about money
+        // repeating on every run, which teaches the reader to stop reading the run line.
+        transferTo.set(txn, targetId);
       }
     }
 
@@ -224,7 +230,11 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
     // conversion appears in both balance statements under a single referenceNumber, so its two
     // legs share one legacy id, and where those balances map to different Actual accounts the
     // second leg would silently vanish as already present.
-    const dates = [...byAccount.values()].flat().map((t) => t.date).sort();
+    // From the scoped ROWS, not the written transactions, because those exclude the suppressed
+    // leg by construction. Two legs thirty seconds apart still fall on different Singapore days
+    // across midnight, and a window built from the written side then covered only the written
+    // leg's day: the right accounts read over the wrong dates, and the duplicate came back.
+    const dates = scoped.map((r) => sgDay(r.date)).sort();
     const seen = new Set();
     const seenInAccount = new Map();
     // One read per MAPPED account, not per written-to account: an account with nothing to write
@@ -232,6 +242,11 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
     // asking the API for a date range this run has no dates for. The reads stay inside this try
     // so the catch below still covers a getTransactions failure — and now that they all happen
     // before the first write, such a failure leaves nothing written to sync.
+    //
+    // ponytail: one read per mapped account, so this scales with the MAPPING rather than with
+    // the batch — a run importing one row still reads every account. Fine at a handful of
+    // accounts. If that stops being true, narrow it to the accounts a row could dedupe against:
+    // the accounts being written to, plus the transfer target of every detected transfer.
     for (const accountId of dates.length ? new Set(Object.values(mapping).filter(Boolean)) : []) {
       const local = new Set();
       for (const t of await api.getTransactions(accountId, dates[0], dates.at(-1))) {
@@ -273,6 +288,15 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
       // and the pot side is never created — money that leaves and arrives nowhere.
       if (fresh.length) await api.addTransactions(accountId, fresh, { runTransfers: true });
       imported += fresh.length;
+      // After the write, so `transfers` means "made this run" and the run log names a movement
+      // of money exactly when one happened. A throw above reports nothing, matching the rows
+      // that never landed.
+      for (const t of fresh) {
+        const to = transferTo.get(t);
+        if (!to) continue;
+        transfers += 1;
+        onTransfer({ date: t.date, amount: t.amount, from: accountId, to });
+      }
     }
   } catch (e) {
     // This loop writes one account at a time, and the caller syncs only once it returns. A throw
