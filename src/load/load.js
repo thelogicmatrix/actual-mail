@@ -1,5 +1,6 @@
 import { baseCurrency } from './fx.js';
 import { rowId, toMinorUnits } from '../row.js';
+import { pairRows, namedAccount } from './transfers.js';
 
 // Trust alerts carry an SGT offset (`...+08:00`), the Wise API answers in UTC (`...Z`), and
 // the calendar day used to be taken off the front of whichever string arrived. That booked
@@ -91,20 +92,44 @@ export function toActualTxn(row, fx = null) {
 }
 
 export async function loadRows(rows, mapping, api, rateLookup = () => null, opts = {}) {
-  const { reconciledThrough = null, transferPayeeFor = null } = opts;
+  const { reconciledThrough = null, transferPayeeFor = null, onTransfer = () => {} } = opts;
   const byAccount = new Map();
   const legacyIds = new Map();
   let converted = 0;
-  let skipped = 0;
+  let transfers = 0;
+  let transfersAlreadySeparate = 0;
 
-  for (const row of rows) {
-    // Same Singapore day as the row itself will be written with. A UTC-derived day here
-    // would drift a Wise row across the reconciliation floor and drop it permanently,
-    // counted only as `skipped`, which nothing surfaces.
+  // The floor is applied HERE rather than inside the loop, because transfer pairing must see
+  // exactly the rows that will be written. A pair whose other leg is already reconciled is
+  // not a pair, and pairing before the floor would book half a transfer against a leg that
+  // was then dropped. inScope() is the same function bin/actual-mail-load.js validates the
+  // mapping against, so the two cannot disagree about what "in scope" means.
+  //
+  // Reconciliation is a human action, and anything up to and including the reconciled date is
+  // settled. Importing it would be backfill into an already-balanced account. inScope compares
+  // the same Singapore day the row is written with: a UTC-derived day would drift a Wise row
+  // across the floor and drop it permanently, counted only as `skipped`, which nothing surfaces.
+  const scoped = inScope(rows, reconciledThrough);
+  const skipped = rows.length - scoped.length;
+
+  // A caller that cannot resolve transfer payees degrades to ordinary transactions rather
+  // than throwing. bin/actual-mail-load.js always supplies one.
+  const canTransfer = typeof transferPayeeFor === 'function';
+  const { pairs, ambiguous } = canTransfer
+    ? pairRows(scoped, mapping)
+    : { pairs: [], ambiguous: 0 };
+
+  // The written leg's target and partner, and the set of legs Actual will create for us.
+  const pairedOut = new Map(pairs.map(({ out, into }) => [out.id, into]));
+  const suppressed = new Set(pairs.map(({ into }) => into.id));
+
+  for (const row of scoped) {
+    // The mirror of this leg is created by Actual from the other side, so writing it here
+    // would double the money. Its id still reaches the budget, joined onto the written
+    // leg's imported_id below, which is what stops it re-importing later.
+    if (suppressed.has(row.id)) continue;
+
     const txnDate = sgDay(row.date);
-    // Reconciliation is a human action, and anything up to and including the reconciled
-    // date is settled. Importing it would be backfill into an already-balanced account.
-    if (reconciledThrough && txnDate <= reconciledThrough) { skipped += 1; continue; }
 
     const accountId = mapping[row.account];
     // A silently dropped account is exactly the quiet data loss this project exists to
@@ -123,6 +148,24 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
       if (!potAccountId) throw new Error(`no Actual account mapped for pot "${row.payee}"`);
       delete txn.payee_name;
       txn.payee = transferPayeeFor(potAccountId);
+    } else if (canTransfer) {
+      // Two ways to know this row is an internal transfer, and both are needed because the
+      // banks are asymmetric. A paired partner row is the evidenced case. A payee naming one
+      // of your own accounts is the only case that works when the receiving bank sends no
+      // alert at all, which UOB was verified to do on 2026-08-27.
+      const partner = pairedOut.get(row.id);
+      const targetKey = partner ? partner.account : namedAccount(row, mapping);
+      const targetId = targetKey ? mapping[targetKey] : null;
+      // A payee naming the row's OWN account is not a transfer, it is a note to self.
+      if (targetId && targetId !== accountId) {
+        delete txn.payee_name;
+        txn.payee = transferPayeeFor(targetId);
+        // Both ids, so the leg Actual creates for us — which carries no imported_id of its
+        // own — cannot come back as a standalone duplicate on the next run.
+        if (partner) txn.imported_id = `${row.id}+${partner.id}`;
+        transfers += 1;
+        onTransfer({ date: txn.date, amount: txn.amount, from: accountId, to: targetId });
+      }
     }
 
     // ponytail: transitional. Rows imported before the account joined the row id carry
@@ -132,7 +175,16 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
     // written from here on. Delete this map and the second `seen.has` once
     // ACTUAL_MAIL_RECONCILED_THROUGH is past the last run made under the old id, because from
     // that point no old-id row is in scope to collide with.
-    if (row.source && row.raw_ref) legacyIds.set(txn.imported_id, rowId(row.source, row.raw_ref));
+    //
+    // A LIST, because a transfer's transaction stands for two rows and either one could be
+    // sitting in the budget under a pre-account id. Storing only the written leg's legacy id
+    // would let the suppressed leg re-import from a pre-2026-08-06 budget entry.
+    if (row.source && row.raw_ref) {
+      const legacy = [rowId(row.source, row.raw_ref)];
+      const partner = pairedOut.get(row.id);
+      if (partner?.source && partner.raw_ref) legacy.push(rowId(partner.source, partner.raw_ref));
+      legacyIds.set(txn.imported_id, legacy);
+    }
 
     if (!byAccount.has(accountId)) byAccount.set(accountId, []);
     byAccount.get(accountId).push(txn);
@@ -149,16 +201,39 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   try {
     for (const [accountId, txns] of byAccount) {
       const dates = txns.map((t) => t.date).sort();
-      const seen = new Set((await api.getTransactions(accountId, dates[0], dates.at(-1)))
-        .map((t) => t.imported_id).filter(Boolean));
+      // Split on '+', because a transfer's imported_id joins the ids of BOTH rows it stands
+      // for. Reading it back as one opaque string would let either leg re-import: the leg
+      // Actual mirrored for us carries no imported_id at all, so the joined id is the only
+      // record that its row was ever seen. A sha256 hex digest never contains '+'.
+      //
+      // The joined id goes in WHOLE as well as in parts. Nothing matches it — a part and a
+      // legacy id are both single digests — so it costs nothing, and it is what lets the
+      // filter below tell an already-written transfer apart from a pair whose legs are in the
+      // budget separately. Without it that test reads `!seen.has(whole)` against a set that
+      // can only ever hold parts, and every healthy re-run reports a phantom split pair.
+      const seen = new Set();
+      for (const t of await api.getTransactions(accountId, dates[0], dates.at(-1))) {
+        if (!t.imported_id) continue;
+        seen.add(String(t.imported_id));
+        for (const part of String(t.imported_id).split('+')) seen.add(part);
+      }
       // The predicate ADDS to `seen`, which is what makes the filter dedupe the incoming batch
       // against ITSELF as well as against the account. Two rows carrying one imported_id were
       // both written before that: the account had neither yet, so neither was "already present".
       // Reachable by concatenating two archives from runs/, re-piping a file, or any upstream
       // double-delivery. The second `seen.has` is the pre-account id — see legacyIds above.
       const fresh = txns.filter((t) => {
-        if (seen.has(t.imported_id) || seen.has(legacyIds.get(t.imported_id))) return false;
-        seen.add(t.imported_id);
+        const parts = String(t.imported_id).split('+');
+        const legacy = legacyIds.get(t.imported_id) ?? [];
+        if (parts.some((p) => seen.has(p)) || legacy.some((l) => seen.has(l))) {
+          // A pair whose legs were each imported separately by earlier runs. Both parts are
+          // already in the budget as ordinary transactions, so writing the transfer now
+          // would be a third copy of the same money. Reported rather than linked: linking
+          // would mean editing transactions already in the budget.
+          if (parts.length > 1 && !seen.has(t.imported_id)) transfersAlreadySeparate += 1;
+          return false;
+        }
+        for (const p of parts) seen.add(p);
         return true;
       });
       alreadyPresent += txns.length - fresh.length;
@@ -182,5 +257,5 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
     }
     throw e;
   }
-  return { imported, converted, skipped, alreadyPresent };
+  return { imported, converted, skipped, alreadyPresent, transfers, transfersAlreadySeparate, ambiguous };
 }

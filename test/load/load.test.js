@@ -522,3 +522,168 @@ test('two rows carrying one imported_id are written once', () => {
     assert.equal(api.calls.flat().length, 1);
   });
 });
+
+// --- internal transfers -------------------------------------------------------------------
+
+const XFER_MAPPING = { uob: 'ACCT_B', main: 'ACCT_A', card: 'ACCT_A', '0000': 'ACCT_B' };
+const xferPayee = (accountId) => `payee-of-${accountId}`;
+
+const xrow = (over) => ({
+  source: 'trust', account: 'main', date: '2026-08-27T13:11:00+08:00',
+  amount: '-700.00', currency: 'SGD', payee: 'somebody', type: 'transfer_out',
+  raw_ref: '<x>', ...over, id: 'x' + (over.id ?? '1'),
+});
+
+function sink() {
+  const written = new Map();
+  return {
+    written,
+    getTransactions: async (accountId) => written.get(accountId) ?? [],
+    addTransactions: async (accountId, txns) => {
+      written.set(accountId, [...(written.get(accountId) ?? []), ...txns]);
+    },
+  };
+}
+
+test('a paired debit and credit write ONE transaction, with a transfer payee', async () => {
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00', raw_ref: '<u>' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00', raw_ref: '<t>' })],
+    XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+
+  assert.equal(r.transfers, 1);
+  assert.equal(r.imported, 1, 'only the outflow leg is written; Actual creates the mirror');
+  const txn = api.written.get('ACCT_B')[0];
+  assert.equal(txn.payee, 'payee-of-ACCT_A');
+  assert.equal(txn.payee_name, undefined, 'a transfer must not carry a payee_name');
+  assert.equal(txn.amount, -70000);
+  // Both row ids, so the suppressed leg can never re-import as a standalone duplicate.
+  assert.equal(txn.imported_id, 'xout+xin');
+});
+
+test('a transfer already written is not written again', async () => {
+  const api = sink();
+  const rows = [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+                xrow({ id: 'in', account: 'main', amount: '700.00' })];
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+  await loadRows(rows, XFER_MAPPING, api, () => null, opts);
+  const second = await loadRows(rows, XFER_MAPPING, api, () => null, opts);
+  assert.equal(second.imported, 0);
+  assert.equal(second.alreadyPresent, 1);
+});
+
+test('one leg arriving alone later dedupes against the joined id', async () => {
+  const api = sink();
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+  await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  // The outflow leg alone, in a later run. Its id is a PART of the stored joined id.
+  const again = await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  assert.equal(again.imported, 0);
+});
+
+test('legs imported separately are reported, not written a third time', async () => {
+  const api = sink();
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+  // Two runs, one leg each, so neither pairs and both land as ordinary transactions.
+  await loadRows([xrow({ id: 'out', account: 'uob', amount: '-700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  await loadRows([xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  // Now a sweep sees both. The pair forms, and must NOT be written on top of them.
+  const sweep = await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  assert.equal(sweep.imported, 0);
+  assert.equal(sweep.transfersAlreadySeparate, 1);
+});
+
+test('a payee naming a mapped account books a transfer with no partner row', async () => {
+  // Trust to UOB. Verified 2026-08-27: UOB sends no inbound alert, so there is no second leg
+  // and pairing alone would leave the far side of this transfer permanently unbooked.
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'solo', account: 'main', amount: '-1.37', payee: 'A/C ending 0000' })],
+    XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.transfers, 1);
+  assert.equal(r.imported, 1);
+  const txn = api.written.get('ACCT_A')[0];
+  assert.equal(txn.payee, 'payee-of-ACCT_B');
+  assert.equal(txn.imported_id, 'xsolo', 'no partner, so no joined id');
+});
+
+test('a payee naming the row own account is NOT a transfer', async () => {
+  // A note to self, not a movement between accounts. Both sides resolve to ACCT_A here, which
+  // is why the mapping overrides '0000' rather than introducing a second digit group: the
+  // global constraint allows only all-zero digits in a committed file.
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'self', account: 'main', amount: '-1.37', payee: 'A/C ending 0000' })],
+    { ...XFER_MAPPING, '0000': 'ACCT_A' }, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.transfers, 0);
+  assert.equal(api.written.get('ACCT_A')[0].payee_name, 'A/C ending 0000');
+});
+
+test('every transfer is reported to the caller so the run log records it', async () => {
+  const api = sink();
+  const seen = [];
+  await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee,
+      onTransfer: (t) => seen.push(t) });
+  assert.equal(seen.length, 1);
+  assert.deepEqual(seen[0], { date: '2026-08-27', amount: -70000, from: 'ACCT_B', to: 'ACCT_A' });
+});
+
+test('with no transferPayeeFor, nothing is treated as a transfer', async () => {
+  // A caller that cannot resolve transfer payees must degrade to ordinary transactions
+  // rather than throw.
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null, { reconciledThrough: '2026-07-26' });
+  assert.equal(r.transfers, 0);
+  assert.equal(r.imported, 2);
+});
+
+test('a leg below the reconciliation floor cannot pair', async () => {
+  // Pairing runs on the post-floor set, so a floor that drops one leg must not leave the
+  // other booked as half a transfer.
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'old', account: 'uob', amount: '-700.00', date: '2026-07-20T13:11:00+08:00' }),
+     xrow({ id: 'new', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.skipped, 1);
+  assert.equal(r.transfers, 0);
+  assert.equal(r.imported, 1);
+});
+
+test('a healthy re-run of a booked transfer is not reported as a split pair', async () => {
+  // transfersAlreadySeparate means "both legs are in the budget as ordinary transactions", a
+  // thing a human has to go and look at. A re-run of a transfer we booked ourselves is not
+  // that, and reporting it would cry wolf on money on every single run. Pinned because the
+  // dedupe set holds the joined id only as its PARTS unless the whole id is added too, and
+  // with only the parts every re-run of every healthy transfer counted here.
+  const api = sink();
+  const rows = [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+                xrow({ id: 'in', account: 'main', amount: '700.00' })];
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+  await loadRows(rows, XFER_MAPPING, api, () => null, opts);
+  const second = await loadRows(rows, XFER_MAPPING, api, () => null, opts);
+  assert.equal(second.transfersAlreadySeparate, 0);
+  assert.equal(second.alreadyPresent, 1, 'still counted as already present, just not as split');
+});
