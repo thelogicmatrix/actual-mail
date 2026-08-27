@@ -2,5 +2,6 @@
 // stray file dropped into this folder cannot start reading someone's mailbox by accident.
 // Adding a bank is one import and one array entry — see docs/WRITING-A-PARSER.md.
 import trustSg from './trust-sg.js';
+import uobSg from './uob-sg.js';
 
-export default [trustSg];
+export default [trustSg, uobSg];
