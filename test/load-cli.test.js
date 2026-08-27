@@ -19,10 +19,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const BIN = fileURLToPath(new URL('../bin/actual-mail-load.js', import.meta.url));
 const TMP = mkdtempSync(join(tmpdir(), 'actual-mail-load-'));
 
+// Carries a LIVE no-inbound-alert licence, not just a complete account list: the four-digit shape
+// test below has a happy path, and without a valid licence here nothing would fail if that test
+// started rejecting one. 'a complete mapping says nothing about licences' passed vacuously before
+// this key existed, because there was no licence in the file to say anything about.
 const MAPPING = join(TMP, 'mapping.json');
 writeFileSync(MAPPING, JSON.stringify({
   '0000': '00000000-0000-0000-0000-00000000000a',
   card: '00000000-0000-0000-0000-00000000000b',
+  'no-inbound-alert:0000': '00000000-0000-0000-0000-00000000000a',
 }));
 
 // A mapping deliberately missing the row's account, for the leak test below. Kept separate so

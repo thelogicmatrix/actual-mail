@@ -275,13 +275,22 @@ beside the leg already created here and the money arrives twice. So the entry is
 you give it by checking: move a small amount in, and confirm nothing arrives from the receiving
 bank while the sending bank's alert does. Without the entry, such a payee is just a payee.
 
-A licence is a claim about a bank, and a row beats a claim. If the same run also holds a row that
-pairs with this one, that row is the receiving bank contradicting the licence, and what happens
-next depends on the budget. Where the pair is **refused** because one of its legs is already
-imported, the licence is not applied either: the payee is left alone and the two rows import
-separately, counted as a transfer left unlinked. Where neither leg is present the pair is simply
-booked as a transfer — one transaction with the transfer payee, counted in `transfers` — so the
-licence is bypassed there too, by the evidenced route rather than the claimed one.
+A licence is a claim about a bank, and a row in the same run is that bank's own behaviour.
+**The licence holds unless the same run contains a row this one pairs or contests with.** Two ways
+to be that row. It paired with a counter-leg and the pair was **refused** because one of the two
+legs was already in your budget: the payee is left alone, both rows import separately, and the run
+counts a transfer left unlinked. Or it was **contested** — it had two or more candidate
+counter-legs, or its single candidate had others of its own — which pairing refuses rather than
+guesses at, and the run line reports as ambiguous. Either way the payee stays a payee and no far
+leg is invented. Where the pair is found and neither leg is in the budget, it is simply booked as
+a transfer, one transaction with the transfer payee counted in `transfers`, so the licence is
+bypassed there too, by the evidenced route rather than the claimed one.
+
+A counter-leg that pairing never treated as a candidate at all leaves the licence fully in force,
+and there are exactly three ways to be that: the two legs are more than two minutes apart, they
+are in different currencies, or they arrived in different runs. Finding those would mean a general
+search for an opposing row, which was deliberately declined. They are what the licence carries
+alone, and they are why it has to be a measurement rather than an opinion.
 
 `<key>` must be a **four-digit account key** in its own right, since four digits is the only
 thing a payee can name. A `no-inbound-alert:<key>` with no matching `<key>` beside it, or over a
@@ -445,12 +454,22 @@ substitute for reading your own diff. It catches shapes, not everything.
    construction, and a domestic row can still settle at a different figure if a hold changes.
    Every estimated row says so in its note. Monthly reconciliation is expected, not
    exceptional.
-2. **Cross-source double counting, within one run only.** A transfer between two of your own
-   accounts appears in both feeds. Legs that land in the **same** run are paired and written as
-   one two-sided transfer. Legs that arrive in different runs — a source down for a run is
-   enough — are counted and reported as a transfer left unlinked, and joining them up is yours to
-   do: the loader never edits a transaction already in your budget. **Cross-currency transfers are
-   not detected at all**, since the two legs are not equal and opposite.
+2. **Cross-source double counting, narrowed to one run and to unambiguous pairs.** A transfer
+   between two of your own accounts appears in both feeds. Two legs are paired and written as one
+   two-sided transfer only when they land in the **same** run, in the same currency, within two
+   minutes, non-zero and equal and opposite, resolving to **different** Actual accounts, and each
+   is the other's only candidate. Miss any of those and both rows import as ordinary
+   transactions: legs in different currencies are never paired at all, legs further apart than
+   the window are not candidates, and legs with more than one candidate between them are refused
+   as ambiguous rather than guessed at. Joining any of those up afterwards is yours to do — the
+   loader never edits a transaction already in your budget.
+
+   The `transfer(s) left unlinked` count is narrower than it sounds: it counts only pairs the
+   loader **found** and then refused because one leg was already imported. A run that sees one
+   leg alone counts nothing and says nothing, and the report appears only once a later run's
+   extract window holds both rows again. The bundled seven-day sweep does that for you. A narrow
+   `--since`, or a source down for more than a week, does not — those legs are simply never
+   reported.
 3. **Fees and interest never alert**, so they never enter this feed at all.
 4. **Conversion depends on an external rate service.** Unreachable means the run fails rather
    than importing an unconverted or guessed number.
@@ -465,6 +484,15 @@ substitute for reading your own diff. It catches shapes, not everything.
    as the Quickstart does — takes no lock, so do not do it while a scheduled run may fire. A
    batch is deduplicated against itself, so a doubled *input* is safe; two concurrent *writers*
    are not.
+7. **A scheduled UOB transfer would import as if it had already happened.** UOB uses one template
+   for both, wording it "made/scheduled", with no status field and no second date to read, so the
+   parser cannot tell them apart. A transfer scheduled for a future value date is written with the
+   *scheduling* timestamp as its date, and cancelling it produces no alert this feed can see —
+   UOB's status mail carries no amount, so it is ignored rather than reported as unparsed. Your
+   budget would then hold spend that never happened, with no offsetting row and no signal to
+   notice it by. **Never observed:** all six historical funds transfers in the thirty-message
+   sample this parser was built from were executed immediately, each with a counterparty credit
+   alert stamped to the same minute.
 
 ## Development
 

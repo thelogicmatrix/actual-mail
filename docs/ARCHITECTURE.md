@@ -119,15 +119,22 @@ The full environment surface, including these, is tabulated once in the
   domestic rows can still differ if a hold settles at a different amount. Every estimated row
   says so in its note.
 - **Cross-source double-count, narrowed rather than closed.** A transfer between two of your own
-  accounts appears in both feeds. Within one run `src/load/transfers.js` pairs the two legs and one
-  transaction is written carrying the target's transfer payee, so nothing is flagged by hand. Three
-  things that still are. Legs that arrive in *different* runs cannot pair at all — a source down for
-  a run separates them — and are counted and reported as a transfer left unlinked, never joined up,
-  because joining them means editing transactions already in the budget. **Cross-currency transfers
-  are not detected**, since two legs in different currencies are not equal and opposite and
-  identifying the pair would depend on an FX rate. And a pair with one leg already in the budget is
-  deliberately not treated as a pair: both rows go through as ordinary transactions so the new leg
-  is still written, and the count says a transfer was left unlinked.
+  accounts appears in both feeds. `src/load/transfers.js` pairs the two legs and one transaction is
+  written carrying the target's transfer payee, so nothing inside a run is flagged by hand — but
+  only where all five conditions hold: same run, same currency, within `WINDOW_MS`, non-zero and
+  equal and opposite in minor units, different resolved Actual account ids, and mutual uniqueness.
+  Four things that are therefore still manual. Legs that arrive in *different* runs cannot pair at
+  all, since a source down for a run separates them. **Cross-currency transfers are not detected**,
+  since two legs in different currencies are not equal and opposite and identifying the pair would
+  depend on an FX rate. Legs with more than one candidate between them are **refused as ambiguous**
+  rather than guessed at, and import as ordinary transactions. And a pair with one leg already in
+  the budget is deliberately not treated as a pair: both rows go through as ordinary transactions
+  so the new leg is still written, and the count says a transfer was left unlinked.
+- **`transfersAlreadySeparate` under-reports, by construction.** It increments only where `pairRows`
+  actually paired two rows and the budget check then refused them, so a run holding one leg alone
+  counts nothing and reports nothing — the split shows up only once a later run's extract window
+  holds both rows again. The bundled seven-day sweep guarantees that. A hand-run `--since`, or a
+  source down for longer than the window, does not, and those legs are never reported at all.
 - **The transfer *booking* path has never run against live mail.** The 2026-08-27 verification
   exercised detection, the refusal of a same-instant currency conversion inside one account, and the
   degrade to ordinary transactions — but every live pair had one leg in the budget already, so no
