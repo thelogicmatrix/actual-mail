@@ -43,6 +43,15 @@ writeFileSync(MAPPING_ORPHAN_LICENCE, JSON.stringify({
   'no-inbound-alert:0000': '00000000-0000-0000-0000-00000000000a',
 }));
 
+// The other inert shape, and the one a presence test cannot see. `namedAccount` only ever returns
+// a four-digit group, so a licence over a named key is unreachable even though the key is mapped.
+const MAPPING_NAMED_LICENCE = join(TMP, 'mapping-named-licence.json');
+writeFileSync(MAPPING_NAMED_LICENCE, JSON.stringify({
+  card: '00000000-0000-0000-0000-00000000000b',
+  main: '00000000-0000-0000-0000-00000000000a',
+  'no-inbound-alert:main': '00000000-0000-0000-0000-00000000000a',
+}));
+
 // A valid row, dated well after any floor these tests set.
 const ROW = {
   id: 'row-1', source: 'trust', account: '0000', date: '2026-07-28T07:24:00+08:00',
@@ -183,10 +192,24 @@ test('an inert no-inbound-alert licence warns, names its key only on stdout, and
     ACTUAL_MAIL_RECONCILED_THROUGH: '2020-01-01',
   }, { stub: true });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stderr, /1 inert|is not in the mapping/);
+  // stderr only. "1 inert" is the stdout wording, so an alternation over the two used to pass on
+  // a branch that could never match and would have survived the stderr line being deleted.
+  assert.match(r.stderr, /not a four-digit key in the mapping/);
   assert.ok(!r.stderr.includes('0000'), 'account digits must not reach the alert body');
   assert.match(r.stdout, /no-inbound-alert:0000/);
   assert.match(r.stderr, /1 row\(s\)/, 'the run still imports');
+});
+
+test('a no-inbound-alert licence over a named key is inert too, and warns', () => {
+  // The case a presence test cannot catch: `main` is mapped, so the key is there, but a payee
+  // names an account by four digits and never by a name — the licence can never be reached.
+  const r = run([{ ...ROW, account: 'card' }], {
+    ACTUAL_MAIL_MAPPING: MAPPING_NAMED_LICENCE,
+    ACTUAL_MAIL_RECONCILED_THROUGH: '2020-01-01',
+  }, { stub: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /not a four-digit key in the mapping/);
+  assert.match(r.stdout, /no-inbound-alert:main/);
 });
 
 test('a complete mapping says nothing about licences', () => {
@@ -316,13 +339,18 @@ test('a real import that syncs cleanly reports its counts and exits 0', () => {
 
 // --- the example mapping ------------------------------------------------------------------
 
-test('mapping.example.json shows all four key shapes the README describes', () => {
+test('mapping.example.json shows all five key shapes the README describes', () => {
   // The four-digit account key is the least guessable of them and a hard error on a user's first
-  // PayNow transfer, and it was the one the example left out.
+  // PayNow transfer, and it was the one the example left out. The count is asserted too: without
+  // it, deleting a line from the example failed nothing, which is how a shape goes missing again.
   const keys = Object.keys(JSON.parse(readFileSync(new URL('../mapping.example.json', import.meta.url))));
+  assert.equal(keys.length, 6, 'five shapes, and the named shape appears twice');
   assert.ok(keys.includes('card'), 'a card key');
   assert.ok(keys.includes('main'), 'a main-account key');
   assert.ok(keys.some((k) => /^\d{4}$/.test(k)), 'a four-digit account key');
   assert.ok(keys.some((k) => k.startsWith('pot:')), 'a pot key');
   assert.ok(keys.some((k) => k.startsWith('wise-')), 'a Wise balance key');
+  // The licence key, and it has to be four-digit: the loader now warns about any other shape,
+  // because a payee names an account by digits and never by a name.
+  assert.ok(keys.some((k) => /^no-inbound-alert:\d{4}$/.test(k)), 'a no-inbound-alert licence key');
 });

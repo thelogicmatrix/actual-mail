@@ -154,14 +154,24 @@ if (reconciledThrough && reconciledThrough >= today) {
 // Exiting would stop a whole run of otherwise correct imports over a typo in an optional entry,
 // which trades a real loss for a cosmetic one. It also runs before the completeness refusal
 // below so one run reports every mapping problem at once, the same promise that check makes.
-const orphanLicences = Object.keys(mapping)
-  .filter((k) => k.startsWith(NO_INBOUND_ALERT) && !mapping[k.slice(NO_INBOUND_ALERT.length)]);
+//
+// The key's SHAPE is checked as well as its presence. `namedAccount` in src/load/transfers.js
+// matches `a/c ending <four digits>` and can only ever hand back a four-digit group, so a licence
+// over any other key — `no-inbound-alert:main`, say — is just as inert however well `main` itself
+// is mapped, and a presence test alone waves it through. The truthiness test is left as it is on
+// purpose: it mirrors `namedAccount`'s own `mapping[m[1]]` lookup, and making those two disagree
+// is how this check starts reporting a problem the loader does not have.
+const orphanLicences = Object.keys(mapping).filter((k) => {
+  if (!k.startsWith(NO_INBOUND_ALERT)) return false;
+  const key = k.slice(NO_INBOUND_ALERT.length);
+  return !/^\d{4}$/.test(key) || !mapping[key];
+});
 if (orphanLicences.length) {
   // Same split as the missing-key check below: the shape of the problem on stderr, the keys
   // themselves on stdout, because a key here is an account's last four digits.
   console.error(`mapping.json has ${orphanLicences.length} "${NO_INBOUND_ALERT}" entry(ies) whose `
-    + 'account key is not in the mapping. Each is inert, so transfers into that account are NOT '
-    + 'being detected. The keys themselves are on stdout, on this host — they are account '
+    + 'account key is not a four-digit key in the mapping. Each is inert, so transfers into that '
+    + 'account are NOT being detected. The keys themselves are on stdout, on this host — they are account '
     + 'digits, so they are not put in this message.');
   local(`mapping.json has ${orphanLicences.length} inert ${NO_INBOUND_ALERT} entry(ies):`);
   for (const k of orphanLicences) local(`  ${k}`);
