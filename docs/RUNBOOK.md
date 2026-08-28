@@ -114,6 +114,17 @@ is gitignored, which is what makes a re-clone cheap rather than a migration.
 
 ## Verify it is actually working
 
+A `DELETED <id> in <account>` line on stdout means a **relink**: the loader found a transfer whose
+counterpart was imported in an earlier run, deleted that stale row and wrote the pair as one
+two-sided transfer. It is the only destructive thing this tool does. The lines land in
+`runs/cron.log` via the documented crontab redirect, never in the Discord body, because a
+transaction id is budget data. A dry run says `WOULD DELETE` instead and deletes nothing.
+
+Seeing `N transfer(s) relinked` repeatedly for the same amount would mean churn, and should not
+happen: the written transfer carries a joined `imported_id`, so the next run short-circuits before
+the relink branch. Two consecutive quiet runs after a relink is the check.
+
+
 Silence does not prove health, which is why every run appends to `run.log` including runs that
 were skipped or suppressed.
 
