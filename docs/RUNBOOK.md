@@ -52,7 +52,8 @@ streak to a six-run window, so the old per-source state files are dead. `rm -f
 <deploy-dir>/.fail-streak-*` after step 2. Nothing reads them, so leaving them is harmless
 rather than wrong — but they will sit in the deploy directory forever otherwise.
 
-**`--all-revs` is not clean in a clone that has fetched `obelisk-backup`, and that is expected.**
+**`--all-revs` is not clean in a clone that has fetched the private archive remote, and that is
+expected.**
 The gate walks `rev-list --objects --all` and `log --all`, and `--all` includes remote-tracking
 refs — so it scans the private pre-flatten archive as well as `main`. Measured on 2026-08-28: 75
 findings across 21 commits, **none of them reachable from `main`**, so git would never push one.
