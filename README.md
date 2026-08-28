@@ -336,19 +336,35 @@ way to say *deliberately absent* rather than *forgotten*.
 Rows from an untracked account are set aside before anything else looks at them: before the
 reconciliation floor, before transfer pairing, and before any FX rate is fetched. They are
 counted on the run line as `N untracked`, never silently dropped. A rate outage cannot fail a
-run whose only foreign rows are untracked ones.
+run whose only foreign rows are untracked ones. The keys in force, and how many rows each matched
+this run, are printed on stdout at the start of every run.
 
-The licence beats an ordinary key rather than replacing it, so a `wise-aud` entry left over from
-before is inert rather than contradictory: removing it is tidier and changes nothing, and there
-is a test that runs both mappings and compares the counts, because "changes nothing" is the kind
-of claim that quietly stops being true.
+Turning a key on does **not** revisit history. Rows already imported from that account under the
+older mapping stay exactly where they are — delete them by hand if you want them gone.
+
+**Delete the ordinary key when you add the untracked one.** Keeping both is refused, and not for
+tidiness: while `wise-aud` still resolves, the account is only untracked on the way *in*. A payee
+naming it is looked up through the ordinary key and never consults the licence, so the account
+stays a legal **target** for a transfer leg invented from that payee — money written into an
+account you have declared outside the budget, and a doubled leg where its own row was already
+imported under the older mapping. Refusing the pair is what makes `untracked:` mean unresolvable,
+which closes the direct write, transfer pairing and licence targeting in one place instead of
+three.
 
 A **typo is refused rather than absorbed**, and it has to be, because the failure is not a
 missing import but an invented one: `untraked:wise-aud` is not a licence, so the ordinary key
 beside it still resolves and the row is converted into the wrong account with the run reporting
 success. The mapping has exactly three legal prefixes — `pot:`, `no-inbound-alert:`,
 `untracked:` — and any other prefixed key stops the run. So does an `untracked:` key whose value
-is not `null`, and one written over a pot target, which could never have fired.
+is not `null`, and one written over a pot target, which could never have fired. All of them are
+reported in one run rather than one per run.
+
+One typo survives all of that: a slip in the **key** half. `untracked:wise-uad` is a legal
+prefix with a null value and no colon, so nothing refuses it — it simply matches nothing, and if
+you also forgot to delete `wise-usd` its rows keep importing. That is what the row count beside
+each key in the in-force listing is for; a `0 rows this run` against a key you expected to fire,
+over a 7-day sweep, is the signal. Delete the ordinary key and the same typo becomes a loud
+unmapped-account error instead, which is the better reason to follow the instruction above.
 
 `untracked:` names a row's **source account**, never a pot. A pot move is two-sided and the pot
 itself is inside the budget, so a pot move out of an untracked account is a hard error rather

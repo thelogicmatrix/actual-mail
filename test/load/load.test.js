@@ -991,11 +991,11 @@ test('splitUntracked partitions rows so the FX date list never carries an untrac
   assert.deepEqual(fxDatesFor([sgdRow, AUD_ROW]), ['2026-07-28']);
 });
 
-// An untracked source account in the base currency, resolving to an account of its OWN. Both
-// details matter: pairing needs the same currency and two DIFFERENT resolved account ids, so a
-// fixture whose untracked key points at the same account as the licensed row can never pair and
-// proves nothing. `cash` rather than `wise-aud` because the Wise keys share the Wise account.
-const UNTRACKED_XFER = { ...XFER_MAPPING, cash: 'ACCT_C', 'untracked:cash': null };
+// A legal untracked mapping: the `untracked:` key and NO ordinary key beside it, which is what
+// bin/actual-mail-load.js now enforces. `cash` rather than `wise-aud` because the Wise keys all
+// share the Wise account, and pairing needs two different resolved account ids to be possible
+// at all — a fixture that cannot pair would prove nothing either way.
+const UNTRACKED_XFER = { ...XFER_MAPPING, 'untracked:cash': null };
 
 test('an untracked row is not evidence against a licence', async () => {
   // The licence stands down when the same run holds a row the licensed one pairs or contests
@@ -1015,21 +1015,6 @@ test('an untracked row is not evidence against a licence', async () => {
     'payee-of-ACCT_B');
 });
 
-test('a leftover ordinary key beside an untracked one really does change nothing', async () => {
-  // README says exactly this, so it is pinned. Without it the claim rests on the leftover key
-  // never making the untracked row a pairing candidate, which is not obvious from either file.
-  const withoutLeftover = { ...XFER_MAPPING, 'untracked:cash': null };
-  const rows = () => [
-    xrow({ id: 'solo', account: 'main', amount: '-1.37', payee: 'A/C ending 0000' }),
-    xrow({ id: 'ghost', account: 'cash', amount: '1.37', payee: 'somebody' })];
-  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
-  const a = await loadRows(rows(), UNTRACKED_XFER, sink(), () => null, opts);
-  const b = await loadRows(rows(), withoutLeftover, sink(), () => null, opts);
-  assert.deepEqual(
-    { imported: a.imported, untracked: a.untracked, transfers: a.transfers },
-    { imported: b.imported, untracked: b.untracked, transfers: b.transfers });
-});
-
 test('a pot move out of an untracked account is a hard error, not a silent nothing', async () => {
   // The pot is inside the budget even when the account the money left is not, so setting the row
   // aside loses an arrival that really happened. Same doctrine as an unmapped account: a row this
@@ -1041,5 +1026,31 @@ test('a pot move out of an untracked account is a hard error, not a silent nothi
       [{ ...ROW, id: 'potout', account: 'cash', type: 'pot_transfer', payee: 'Buffer' }],
       { '0000': 'uuid-a', 'pot:Buffer': 'uuid-pot', 'untracked:cash': null },
       fakeApi(), () => null, { transferPayeeFor: (id) => `payee-of-${id}` }),
-    /untracked account "cash" but its pot "Buffer" is in the budget/);
+    /untracked account "cash" for pot "Buffer"/);
+});
+
+test('a pot move below the reconciliation floor does not throw — it was settled long ago', async () => {
+  // The guard was placed before inScope, so a pot move imported and reconciled weeks earlier
+  // aborted the whole run. On an hourly cron that is a feed that stops until a human edits the
+  // mapping, over a row that was never going to be written. Every other hard error in the loader
+  // is floor-gated; this one has to be too.
+  const r = await loadRows(
+    [{ ...ROW, id: 'oldpot', account: 'cash', type: 'pot_transfer', payee: 'Buffer',
+       date: '2026-07-01T09:00:00+08:00' }],
+    { '0000': 'uuid-a', 'pot:Buffer': 'uuid-pot', 'untracked:cash': null },
+    fakeApi(), () => null,
+    { reconciledThrough: '2026-07-20', transferPayeeFor: (id) => `payee-of-${id}` });
+  assert.equal(r.imported, 0);
+});
+
+test('a pot move out of an untracked account throws even when the pot is unmapped', async () => {
+  // The guard was conditional on the pot being mapped, which inverted its own reason: with the
+  // pot key absent the row was silently discarded, where before the feature it was a loud
+  // "no Actual account mapped for pot" error. Least configuration, quietest failure.
+  await assert.rejects(
+    () => loadRows(
+      [{ ...ROW, id: 'potout', account: 'cash', type: 'pot_transfer', payee: 'Buffer' }],
+      { '0000': 'uuid-a', 'untracked:cash': null },
+      fakeApi(), () => null, { transferPayeeFor: (id) => `payee-of-${id}` }),
+    /untracked account "cash"/);
 });

@@ -83,6 +83,16 @@ writeFileSync(MAPPING_UNTRACKED_POT, JSON.stringify({
   'untracked:pot:Buffer': null,
 }));
 
+// An `untracked:` key beside the ordinary key for the same account. "The licence beats the
+// ordinary key" was the original design and it is not enough: `namedAccount` resolves a payee
+// through `mapping[<four digits>]` and never consults the licence, so the account stays a legal
+// TARGET for an invented transfer leg even though its own rows are being set aside.
+const MAPPING_UNTRACKED_COEXIST = join(TMP, 'mapping-untracked-coexist.json');
+writeFileSync(MAPPING_UNTRACKED_COEXIST, JSON.stringify({
+  '0000': '00000000-0000-0000-0000-00000000000a',
+  'untracked:0000': null,
+}));
+
 const MAPPING_ORPHAN_LICENCE = join(TMP, 'mapping-orphan-licence.json');
 writeFileSync(MAPPING_ORPHAN_LICENCE, JSON.stringify({
   card: '00000000-0000-0000-0000-00000000000b',
@@ -471,4 +481,50 @@ test('an untracked licence over a pot target is refused rather than silently doi
   const r = run([ROW], { ACTUAL_MAIL_MAPPING: MAPPING_UNTRACKED_POT }, { stub: true });
   assert.equal(r.status, 1);
   assert.match(r.stderr, /pot target cannot be untracked/);
+});
+
+test('an untracked account that is still mapped is refused, because it can still be written to', () => {
+  // Not a tidiness rule. While the ordinary key resolves, the account remains a legal target for
+  // a transfer leg invented from a payee, so money is written INTO an account the operator has
+  // declared outside the budget. Refusing the coexistence is what makes "untracked" mean
+  // unresolvable, which closes pairing, licence targeting and the direct write in one place
+  // rather than three.
+  const r = run([ROW], { ACTUAL_MAIL_MAPPING: MAPPING_UNTRACKED_COEXIST }, { stub: true });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /also mapped/);
+  assert.ok(!r.stderr.includes('untracked:0000'), 'a mapping key must not reach the alert body');
+  assert.match(r.stdout, /untracked:0000/);
+});
+
+test('every mapping problem in one run, not one per run cycle', () => {
+  // The file promises this 40 lines above the missing-key check, and three sequential exits
+  // broke it: an operator with two mistakes fixed one, waited an hour, and found the next.
+  const both = join(TMP, 'mapping-two-faults.json');
+  writeFileSync(both, JSON.stringify({
+    '0000': '00000000-0000-0000-0000-00000000000a',
+    'untraked:wise-aud': null,
+    'untracked:wise-usd': '00000000-0000-0000-0000-00000000000c',
+  }));
+  const r = run([ROW], { ACTUAL_MAIL_MAPPING: both }, { stub: true });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /unrecognised prefix/);
+  assert.match(r.stderr, /must be null/);
+});
+
+test('the in-force listing says how many rows each untracked key matched', () => {
+  // A typo in the KEY half passes every refusal — it is a legal prefix, a null value and no
+  // colon — and then matches nothing while the ordinary key still imports the rows. A count of
+  // zero beside the key is what makes that visible without a per-run warning nobody would read.
+  const m = join(TMP, 'mapping-untracked-counts.json');
+  writeFileSync(m, JSON.stringify({
+    '0000': '00000000-0000-0000-0000-00000000000a',
+    'untracked:wise-aud': null,
+    'untracked:wise-uad': null,
+  }));
+  const aud = { ...ROW, id: 'aud-2', source: 'wise', account: 'wise-aud',
+                amount: '-42.00', currency: 'AUD', payee: 'TEST MERCHANT AU' };
+  const r = run([ROW, aud], { ACTUAL_MAIL_MAPPING: m }, { stub: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /wise-aud \(1 row/);
+  assert.match(r.stdout, /wise-uad \(0 rows/);
 });

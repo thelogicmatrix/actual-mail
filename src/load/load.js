@@ -152,19 +152,22 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   // rate lookup. Counted separately from `skipped`, which means "already reconciled" and is a
   // different fact about a different row.
   const { tracked, untracked } = splitUntracked(rows, mapping);
-  // A pot move is two-sided by definition, and the pot side is inside the budget. Setting one
-  // aside because the account it LEFT is untracked would lose an arrival that really happened —
-  // the quiet loss this loader exists to prevent — so it is a hard error, exactly as an unmapped
-  // account is. Unreachable on a mapping where the untracked accounts are foreign-currency
-  // balances and the pots belong to one bank, which is why it is pinned rather than assumed.
-  for (const row of untracked) {
-    if (row.type === 'pot_transfer' && mapping[`pot:${row.payee}`]) {
-      throw new Error(`row leaves untracked account "${row.account}" but its pot "${row.payee}" `
-        + 'is in the budget — one side of a pot move cannot be untracked');
-    }
-  }
   const scoped = inScope(tracked, reconciledThrough);
   const skipped = tracked.length - scoped.length;
+  // A pot move is two-sided by definition and the pot side is inside the budget, so setting one
+  // aside because the account it LEFT is untracked would lose an arrival that really happened —
+  // the quiet loss this loader exists to prevent. A hard error, exactly as an unmapped account
+  // is, and unconditionally: gating it on the pot being mapped inverted the reason for it, since
+  // an unmapped pot was the case with the LEAST configuration and so the quietest failure.
+  // Floor-gated like every other hard error here — a row the operator reconciled weeks ago was
+  // never going to be written, and aborting an hourly cron over it stops the feed until someone
+  // edits the mapping.
+  for (const row of inScope(untracked, reconciledThrough)) {
+    if (row.type === 'pot_transfer') {
+      throw new Error(`row leaves untracked account "${row.account}" for pot "${row.payee}", `
+        + 'which is in the budget — one side of a pot move cannot be untracked');
+    }
+  }
 
   // A caller that cannot resolve transfer payees degrades to ordinary transactions rather
   // than throwing. bin/actual-mail-load.js always supplies one.
