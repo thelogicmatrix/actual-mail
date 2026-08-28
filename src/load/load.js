@@ -40,6 +40,33 @@ export function inScope(rows, reconciledThrough = null) {
 // orphan licences stayed silent, which is the failure the warning exists to catch.
 export const NO_INBOUND_ALERT = 'no-inbound-alert:';
 
+// The mapping key prefix that says: this source account is deliberately OUTSIDE the budget.
+// Same convention as `pot:` and `no-inbound-alert:`, and the value is null because there is no
+// Actual account to name — which also keeps the key out of the `Object.values(mapping)` scan
+// that fetches each account's existing transactions.
+//
+// This exists because Wise holds a balance per currency but the budget carries ONE Wise account,
+// denominated in the base currency. Without it a `wise-aud` row resolves to that SGD account and
+// takes the FX path, inventing an SGD debit for money that never moved in SGD. Removing the
+// mapping key instead is not the same fix: the loader hard-errors on an unmapped account, so a
+// single foreign movement would fail the whole run rather than one row.
+//
+// The licence BEATS a real key rather than replacing it, so a key left in place from before is
+// inert rather than contradictory.
+export const UNTRACKED = 'untracked:';
+
+// ponytail: a partition, not a filter plus a count. The caller needs both halves — the rows to
+// keep and how many were set aside — and returning one and recomputing the other is how a
+// dropped row stops being counted.
+export function splitUntracked(rows, mapping) {
+  const keys = new Set(Object.keys(mapping)
+    .filter((k) => k.startsWith(UNTRACKED)).map((k) => k.slice(UNTRACKED.length)));
+  const tracked = [];
+  const untracked = [];
+  for (const row of rows) (keys.has(row.account) ? untracked : tracked).push(row);
+  return { tracked, untracked };
+}
+
 export function fxDatesFor(rows, base = baseCurrency()) {
   return rows.filter((r) => r.currency !== base).map((r) => sgDay(r.date));
 }
@@ -119,8 +146,28 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   // settled. Importing it would be backfill into an already-balanced account. inScope compares
   // the same Singapore day the row is written with: a UTC-derived day would drift a Wise row
   // across the floor and drop it permanently, counted only as `skipped`, which nothing surfaces.
-  const scoped = inScope(rows, reconciledThrough);
-  const skipped = rows.length - scoped.length;
+  // Untracked rows come out BEFORE the floor, before pairing and before the FX path, because
+  // every one of those would otherwise treat the row as money in this budget: pairing could
+  // match it as a transfer leg, and the mapped-but-untracked account would take it at the
+  // rate lookup. Counted separately from `skipped`, which means "already reconciled" and is a
+  // different fact about a different row.
+  const { tracked, untracked } = splitUntracked(rows, mapping);
+  const scoped = inScope(tracked, reconciledThrough);
+  const skipped = tracked.length - scoped.length;
+  // A pot move is two-sided by definition and the pot side is inside the budget, so setting one
+  // aside because the account it LEFT is untracked would lose an arrival that really happened —
+  // the quiet loss this loader exists to prevent. A hard error, exactly as an unmapped account
+  // is, and unconditionally: gating it on the pot being mapped inverted the reason for it, since
+  // an unmapped pot was the case with the LEAST configuration and so the quietest failure.
+  // Floor-gated like every other hard error here — a row the operator reconciled weeks ago was
+  // never going to be written, and aborting an hourly cron over it stops the feed until someone
+  // edits the mapping.
+  for (const row of inScope(untracked, reconciledThrough)) {
+    if (row.type === 'pot_transfer') {
+      throw new Error(`row leaves untracked account "${row.account}" for pot "${row.payee}", `
+        + 'which is in the budget — one side of a pot move cannot be untracked');
+    }
+  }
 
   // A caller that cannot resolve transfer payees degrades to ordinary transactions rather
   // than throwing. bin/actual-mail-load.js always supplies one.
@@ -242,7 +289,12 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   // size against a silent doubling. If batches ever grow, index candidates by currency and
   // absolute minor amount instead of comparing every row with every other.
   const inScopeIds = new Set(scoped.map((r) => r.id));
-  const all = canTransfer ? pairRows(rows, mapping) : { pairs: [], contested: new Set() };
+  // `tracked`, not `rows`: an untracked row is never written, so Actual can never mirror it
+  // and it can never be the counterpart this pass is looking for. Counting it as evidence
+  // silently downgraded a real internal transfer to an ordinary spend, with no `ambiguous`
+  // and no `left unlinked` count to show it. It still sees rows the FLOOR skipped, which is
+  // what this second pass is for — splitUntracked runs before inScope, so that is unchanged.
+  const all = canTransfer ? pairRows(tracked, mapping) : { pairs: [], contested: new Set() };
   for (const id of all.contested) refused.add(id);
   for (const { out, into } of all.pairs) {
     if (inScopeIds.has(out.id) !== inScopeIds.has(into.id)) {
@@ -418,5 +470,6 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
     }
     throw e;
   }
-  return { imported, converted, skipped, alreadyPresent, transfers, transfersAlreadySeparate, ambiguous };
+  return { imported, converted, skipped, alreadyPresent, untracked: untracked.length,
+           transfers, transfersAlreadySeparate, ambiguous };
 }

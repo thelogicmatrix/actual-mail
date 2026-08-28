@@ -438,6 +438,26 @@ test('an all-zero key is the placeholder convention and passes', () => {
   }
 });
 
+test('a prefixed mapping key does not hide an account number from the gate', () => {
+  // The mapping's own documented shapes put a prefix in front of the digits, and the rule
+  // anchored the digits straight after the opening quote — so every prefixed key was invisible
+  // to the one rule that exists to catch a bare account number. `.gitignore` covers the real
+  // mapping file, but this is the backstop, and a backstop one shape thinner than the schema it
+  // guards is the failure mode the account-key rule was added for in the first place.
+  // Invented digits, per the header of scan-pii.js.
+  for (const line of ['{ "no-inbound-alert:5678": uuid }', '{ "untracked:5678": null }']) {
+    assert.equal(scanText(line).filter((h) => h.rule === 'account key').length, 1,
+      `expected one account-key hit in: ${line}`);
+  }
+});
+
+test('an all-zero key stays the placeholder convention behind a prefix too', () => {
+  for (const line of ['{ "no-inbound-alert:0000": uuid }', '{ "untracked:0000": null }']) {
+    assert.deepEqual(scanText(line).filter((h) => h.rule === 'account key'), [],
+      `all-zero key must pass behind a prefix: ${line}`);
+  }
+});
+
 test('a stack-trace line number is not an account key', () => {
   // `net.js:1141:16` is four digits followed by a colon. Anchoring the rule to a key position is
   // what keeps this rule usable rather than something people learn to override.

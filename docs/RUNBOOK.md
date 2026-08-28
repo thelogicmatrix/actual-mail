@@ -52,6 +52,29 @@ streak to a six-run window, so the old per-source state files are dead. `rm -f
 <deploy-dir>/.fail-streak-*` after step 2. Nothing reads them, so leaving them is harmless
 rather than wrong — but they will sit in the deploy directory forever otherwise.
 
+**One-off, upgrading past 2026-08-28:** the code half of untracked source accounts ships with
+the push, but the half that turns it on is `mapping.json`, which is gitignored and lives only on
+the deploy host. **Edit it in the same maintenance window as the pull**, or the run behaves
+exactly as before and nothing says so. For each non-base-currency balance, **replace** the
+ordinary key with an untracked one — with a single SGD Wise account that means deleting
+`wise-aud` and `wise-usd` and adding `"untracked:wise-aud": null` and
+`"untracked:wise-usd": null`. Both, not just the one that has already cost you a row. Keeping the
+ordinary key beside the untracked one is refused by the loader, because while it resolves the
+account can still be written to as a transfer target.
+
+Confirm on the next run: stdout carries `untracked source account(s) in force` with a row count
+beside each key. A key you expected to fire showing `0 rows this run` across a 7-day sweep is a
+typo in the key half — the one mistake nothing refuses.
+
+Rows already imported from those accounts are **not** revisited. Anything the old behaviour
+wrote is still in the budget and has to be deleted by hand.
+
+**Rollback ordering for that change:** restore the ordinary `wise-<ccy>` keys and delete the
+`untracked:` ones in a **single edit**, then revert the code. Old code does not understand
+`untracked:`, so a mapping carrying only those keys has no key for those accounts at all, and an
+unmapped account is a hard error — every hourly run exits 1 until someone notices. Doing it in
+one edit is what avoids that window in either direction.
+
 **Also one-off, and it breaks step 2:** this repo was republished from a fresh root commit, so a
 clone made before that has no common ancestor with it and `git pull --ff-only` fails with
 `refusing to merge unrelated histories`. Do not force the merge — re-clone into a new directory

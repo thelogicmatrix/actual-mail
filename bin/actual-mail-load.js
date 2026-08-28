@@ -2,7 +2,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as api from '@actual-app/api';
-import { loadRows, sgDay, inScope, fxDatesFor, NO_INBOUND_ALERT } from '../src/load/load.js';
+import { loadRows, sgDay, inScope, fxDatesFor, splitUntracked, NO_INBOUND_ALERT, UNTRACKED } from '../src/load/load.js';
 import { fetchRates, makeRateLookup, DEFAULT_MARKUP } from '../src/load/fx.js';
 
 const USAGE = `actual-mail-load - normalised transaction rows on stdin -> Actual Budget
@@ -177,10 +177,101 @@ if (orphanLicences.length) {
   for (const k of orphanLicences) local(`  ${k}`);
 }
 
+// Mapping faults that are refusals rather than warnings, collected so ONE run reports all of
+// them. Three sequential exits broke the promise made above the missing-key check: an operator
+// with two mistakes fixed one, waited an hour for the next run, and found the next. Each entry
+// is [shape for stderr, keys for stdout] — the same channel split every mapping complaint makes,
+// because a key can carry account digits and stderr becomes the Discord body.
+//
+// These refuse rather than warn because every one of them WRITES money that should not be
+// written. An inert `no-inbound-alert:` licence loses a link and warns; an inert `untracked:`
+// licence imports the row it was supposed to set aside, and converts it on the way in.
+const faults = [];
+
+// Every legal prefixed key shape, and the list is closed. A key like `untraked:wise-aud` is not
+// a licence, so the ordinary `wise-aud` key beside it still resolves and the row is FX-converted
+// into an account it does not belong in. There is no fuzzy match for a typo, but there does not
+// need to be: three prefixes are legal and anything else is a mistake. Checked against the
+// constants the loader itself honours, so this cannot drift from them.
+const PREFIXES = ['pot:', NO_INBOUND_ALERT, UNTRACKED];
+const badPrefix = Object.keys(mapping)
+  .filter((k) => k.includes(':') && !PREFIXES.some((p) => k.startsWith(p)));
+if (badPrefix.length) {
+  faults.push([`${badPrefix.length} key(s) with an unrecognised prefix (legal: ${PREFIXES.join(' ')})`,
+    badPrefix]);
+}
+
+// The one that makes `untracked:` mean what it says. While the ordinary key still resolves, the
+// account is only untracked on the way IN: `namedAccount` in src/load/transfers.js looks a payee
+// up through `mapping[<four digits>]` and never consults the licence, so the account remains a
+// legal TARGET for a transfer leg invented from a payee — money written into an account the
+// operator has declared outside the budget, and a doubled leg where its own row was imported
+// under an earlier mapping. Refusing the coexistence closes pairing, licence targeting and the
+// direct write at once, by making the account unresolvable, rather than patching three paths and
+// hoping a fourth is not added. It is also what makes the docs' "removing it changes nothing"
+// true by construction instead of by ordering.
+const stillMapped = Object.keys(mapping)
+  .filter((k) => k.startsWith(UNTRACKED) && mapping[k.slice(UNTRACKED.length)]);
+if (stillMapped.length) {
+  faults.push([`${stillMapped.length} untracked account(s) that are also mapped — remove the `
+    + 'ordinary key, or the account can still be written to as a transfer target', stillMapped]);
+}
+
+// A pot target cannot be untracked: the licence matches a row's SOURCE account, so the key can
+// never fire, and a pot move is two-sided anyway — excluding one side of it is a contradiction.
+const untrackedNested = Object.keys(mapping)
+  .filter((k) => k.startsWith(UNTRACKED) && k.slice(UNTRACKED.length).includes(':'));
+if (untrackedNested.length) {
+  faults.push([`${untrackedNested.length} ${UNTRACKED} key(s) over another prefixed key, which `
+    + 'can never fire — a pot target cannot be untracked', untrackedNested]);
+}
+
+// An `untracked:` key names no account, so its value must be null. A stray id there is not
+// merely untidy: `Object.values(mapping)` drives the dedupe read, and a non-null value makes the
+// loader ask Actual for the transactions of an account that need not exist.
+const untrackedWithValue = Object.keys(mapping)
+  .filter((k) => k.startsWith(UNTRACKED) && mapping[k] !== null);
+if (untrackedWithValue.length) {
+  faults.push([`${untrackedWithValue.length} ${UNTRACKED} key(s) whose value must be null`,
+    untrackedWithValue]);
+}
+
+if (faults.length) {
+  console.error(`mapping.json has ${faults.length} fault(s) that stop the run: `
+    + `${faults.map(([shape]) => shape).join('; ')}. The keys themselves are on stdout, on this `
+    + 'host — they can carry account digits, so they are not put in this message.');
+  for (const [shape, keys] of faults) {
+    local(`mapping.json: ${shape}`);
+    for (const k of keys) local(`  ${k}`);
+  }
+  process.exit(1);
+}
+
+// Positive confirmation that the mechanism is configured, and the only instrument that catches
+// a typo in the KEY half. That one passes every refusal above — legal prefix, null value, no
+// colon — and then matches nothing while the ordinary key it was meant to replace keeps
+// importing. A count of zero beside the key is what makes it visible. Not a warning: a quiet
+// week for one account is normal, and a warning that fires most runs teaches the operator to
+// ignore the channel that carries real faults. Stdout, with every other mapping key, never the
+// alert body — an account key can be four digits.
+const untrackedKeys = Object.keys(mapping).filter((k) => k.startsWith(UNTRACKED));
+if (untrackedKeys.length) {
+  local(`${untrackedKeys.length} untracked source account(s) in force:`);
+  for (const k of untrackedKeys) {
+    const key = k.slice(UNTRACKED.length);
+    const n = rows.filter((r) => r.account === key).length;
+    local(`  ${key} (${n} row${n === 1 ? '' : 's'} this run)`);
+  }
+}
+
 // Completeness check on the mapping, over the rows that will actually be written. Reporting
 // every missing key at once beats discovering them one hard error at a time. inScope() lives in
 // load.js so it cannot disagree with loadRows about which rows are in scope.
-const willImport = inScope(rows, reconciledThrough);
+// splitUntracked first, so an account the operator deliberately kept out of the budget is not
+// reported as a missing key and does not put its date on the FX list. Both checks below ask
+// "what will actually be written", and an untracked row will not be — loadRows partitions the
+// same way, from the same mapping, so the two cannot disagree about which rows those are.
+const willImport = inScope(splitUntracked(rows, mapping).tracked, reconciledThrough);
 // A pot transfer needs BOTH keys — the account it leaves and the pot it lands in — and
 // loadRows throws on either. Substituting one for the other meant pot rows fell out of the
 // "report every missing key at once" promise and failed one hard error at a time instead.
@@ -266,13 +357,18 @@ try {
   const onTransfer = ({ date, amount, from, to }) =>
     local(`TRANSFER ${date} ${String(amount).padStart(9)}  ${from} -> ${to}`);
 
-  const { imported, converted, skipped, alreadyPresent,
+  const { imported, converted, skipped, alreadyPresent, untracked,
           transfers, transfersAlreadySeparate, ambiguous } = await loadRows(
     rows, mapping, dryRun ? sink : api, rateLookup,
     { reconciledThrough, transferPayeeFor, onTransfer });
 
   const tail = `${converted ? `, ${converted} FX-estimated` : ''}`
     + `${skipped ? `, ${skipped} skipped as reconciled` : ''}`
+    // Set aside because their source account is outside the budget, NOT converted into it.
+    // Counted rather than merely absent: a row that vanishes with nothing said is the quiet
+    // loss this loader exists to prevent, and the count is what makes a mis-typed
+    // `untracked:` key visible as rows going missing instead of as silence.
+    + `${untracked ? `, ${untracked} untracked` : ''}`
     + `${alreadyPresent ? `, ${alreadyPresent} already present` : ''}`
     + `${transfers ? `, ${transfers} transfer(s)` : ''}`
     // At least one leg was already in the budget — an ordinary transaction, a transfer leg
