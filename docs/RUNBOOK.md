@@ -52,6 +52,20 @@ streak to a six-run window, so the old per-source state files are dead. `rm -f
 <deploy-dir>/.fail-streak-*` after step 2. Nothing reads them, so leaving them is harmless
 rather than wrong — but they will sit in the deploy directory forever otherwise.
 
+**`--all-revs` is not clean in a clone that has fetched `obelisk-backup`, and that is expected.**
+The gate walks `rev-list --objects --all` and `log --all`, and `--all` includes remote-tracking
+refs — so it scans the private pre-flatten archive as well as `main`. Measured on 2026-08-28: 75
+findings across 21 commits, **none of them reachable from `main`**, so git would never push one.
+Before reading a non-zero count as a publication blocker, check reachability:
+
+```
+npm run scan -- --all-revs 2>&1 | grep -oE '^[0-9a-f]{7,40}:' | tr -d ':' | sort -u   | while read c; do git merge-base --is-ancestor $c main && echo "REACHABLE $c"; done
+```
+
+Nothing printed means the publishable history is clean. `docs/FEATURES.md` says the gate passes
+on every revision; that is true of `main`'s own history and was written in a clone that had not
+fetched the archive.
+
 **One-off, upgrading past 2026-08-28:** the code half of untracked source accounts ships with
 the push, but the half that turns it on is `mapping.json`, which is gitignored and lives only on
 the deploy host. **Edit it in the same maintenance window as the pull**, or the run behaves
