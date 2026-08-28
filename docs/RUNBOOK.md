@@ -83,6 +83,12 @@ tree. The version you just replaced stops matching and is scanned like any other
 the documented refresh path, and it is why a count can jump on a commit that touched neither
 PII nor history — read the new findings before pasting hashes into `SELF_REVIEWED`.
 
+**That exemption waives the structural rules only.** Literal rules from `private.local.json`
+apply to the checked-out copy of both files like any other file, because a literal rule is a
+hand-authored "always flag this string" and these two are the likeliest in the tree to quote
+one. Before 2026-08-28 it waived everything, and a private host's name sat in both from the
+publication commit onwards without the gate ever saying so.
+
 **One-off, upgrading past 2026-08-28:** the code half of untracked source accounts ships with
 the push, but the half that turns it on is `mapping.json`, which is gitignored and lives only on
 the deploy host. **Edit it in the same maintenance window as the pull**, or the run behaves
