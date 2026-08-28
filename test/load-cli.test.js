@@ -53,6 +53,36 @@ writeFileSync(MAPPING_UNTRACKED, JSON.stringify({
   'untracked:wise-aud': null,
 }));
 
+// A one-character slip in the prefix. The ordinary `wise-aud` key is still present — the state
+// the README recommends — so without a guard the row imports, takes the FX path and invents an
+// SGD debit, with the run reporting success. There is no fuzzy match for this; what makes it
+// catchable is that the mapping has exactly three legal prefixes and this is not one of them.
+const MAPPING_TYPO_PREFIX = join(TMP, 'mapping-typo-prefix.json');
+writeFileSync(MAPPING_TYPO_PREFIX, JSON.stringify({
+  '0000': '00000000-0000-0000-0000-00000000000a',
+  'wise-aud': '00000000-0000-0000-0000-00000000000c',
+  'untraked:wise-aud': null,
+}));
+
+// An `untracked:` key carrying an account id instead of null. The row is still set aside, so the
+// value is load-bearing for nothing except the dedupe read, where it makes the loader ask Actual
+// for the transactions of an account that need not exist.
+const MAPPING_UNTRACKED_VALUE = join(TMP, 'mapping-untracked-value.json');
+writeFileSync(MAPPING_UNTRACKED_VALUE, JSON.stringify({
+  '0000': '00000000-0000-0000-0000-00000000000a',
+  'untracked:wise-aud': '00000000-0000-0000-0000-00000000000c',
+}));
+
+// `untracked:` over a pot target. splitUntracked matches a row's source account only, so this
+// key can never fire and excludes nothing — and a pot move is two-sided anyway, so wanting to
+// exclude one side of it is already a contradiction.
+const MAPPING_UNTRACKED_POT = join(TMP, 'mapping-untracked-pot.json');
+writeFileSync(MAPPING_UNTRACKED_POT, JSON.stringify({
+  '0000': '00000000-0000-0000-0000-00000000000a',
+  'pot:Buffer': '00000000-0000-0000-0000-00000000000d',
+  'untracked:pot:Buffer': null,
+}));
+
 const MAPPING_ORPHAN_LICENCE = join(TMP, 'mapping-orphan-licence.json');
 writeFileSync(MAPPING_ORPHAN_LICENCE, JSON.stringify({
   card: '00000000-0000-0000-0000-00000000000b',
@@ -407,4 +437,38 @@ test('the run reports how many rows were set aside as untracked', () => {
   // And the row itself never reaches a budget line.
   assert.ok(!r.stdout.includes('aud-1'), 'an untracked row must not be written');
   assert.equal(r.stdout.match(/^DRY /gm).length, 1);
+});
+
+test('a mapping key with an unrecognised prefix is refused, not quietly ignored', () => {
+  // The failure this prevents is not a missing import — it is an invented one. `untraked:` is
+  // not a licence, so the ordinary key still resolves and the AUD row is FX-converted into the
+  // SGD account. Refusing beats warning here: a warning still writes the money.
+  const r = run([ROW], { ACTUAL_MAIL_MAPPING: MAPPING_TYPO_PREFIX }, { stub: true });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /unrecognised prefix/);
+  // Same channel split as every other mapping complaint: the shape on stderr, which run.sh
+  // ships to Discord, and the key itself on stdout, which stays on the host.
+  assert.ok(!r.stderr.includes('untraked:wise-aud'), 'a mapping key must not reach the alert body');
+  assert.match(r.stdout, /untraked:wise-aud/);
+});
+
+test('an untracked key carrying an account id is refused', () => {
+  const r = run([ROW], { ACTUAL_MAIL_MAPPING: MAPPING_UNTRACKED_VALUE }, { stub: true });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /must be null/);
+});
+
+test('the untracked keys in force are named on stdout, so a quiet day is not mistaken for an unconfigured one', () => {
+  // Without this, "the mechanism is on and nothing matched" and "nobody ever added the key"
+  // produce byte-identical output, which is how the fix ships switched off and nobody notices.
+  const r = run([ROW], { ACTUAL_MAIL_MAPPING: MAPPING_UNTRACKED }, { stub: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /untracked source account\(s\) in force/);
+  assert.match(r.stdout, /wise-aud/);
+});
+
+test('an untracked licence over a pot target is refused rather than silently doing nothing', () => {
+  const r = run([ROW], { ACTUAL_MAIL_MAPPING: MAPPING_UNTRACKED_POT }, { stub: true });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /pot target cannot be untracked/);
 });

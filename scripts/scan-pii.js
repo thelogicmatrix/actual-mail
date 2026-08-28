@@ -57,7 +57,9 @@ const ALLOWED = [
   // The account-key rule's placeholder form. Single-ended on purpose and safe for it: the match
   // it is testing always ends in the colon that made it a key, so there is no longer string a
   // substring of this could satisfy.
-  /^[{,]?\s*['"]?0+['"]?\s*:$/,
+  // The optional prefix run mirrors the rule above; the digits still have to be ALL zeros, so a
+  // real account number cannot reach this however it is prefixed.
+  /^[{,]?\s*['"]?(?:[a-z][a-z-]*:)*0+['"]?\s*:$/,
   /^[\w.+-]+@example\.(?:com|org|net)$/,
   /^noreply@(?:example\.(?:com|org|net)|anthropic\.com)$/i,
   /^[\w.+-]+@users\.noreply\.github\.com$/i,
@@ -97,7 +99,11 @@ const STRUCTURAL = [
   // Anchored to a key position (`{`, `,` or line start) so a stack-trace line like
   // `net.js:1141:16` is not a finding. All-zero runs are the placeholder convention and are
   // waved through by ALLOWED, the same bargain `ending 0000` already makes.
-  ['account key', /(?:[{,]|^)\s*['"]?(\d{4})['"]?\s*:/gm],
+  // The optional `<word>:` run inside the quotes is the mapping's own prefix convention --
+  // `pot:`, `no-inbound-alert:`, `untracked:`. Without it every prefixed key was invisible to
+  // this rule, so the one shape the schema says carries an account number was the one shape the
+  // gate could not see. `[a-z-]+` only, so `net.js:1141:16` still needs its `.` and stays out.
+  ['account key', /(?:[{,]|^)\s*['"]?(?:[a-z][a-z-]*:)*(\d{4})['"]?\s*:/gm],
   // Any two-letter code, not a list of nine. The list was the nine countries the maintainer's
   // own statements happened to contain, so `GRAB HOLDINGS MY` and the same line ending JP, AU,
   // TH, CN, IN, FR, KR, PH, VN, TW, CH or CA all scanned clean — Malaysia, Japan, Australia and

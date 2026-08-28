@@ -2,7 +2,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as api from '@actual-app/api';
-import { loadRows, sgDay, inScope, fxDatesFor, splitUntracked, NO_INBOUND_ALERT } from '../src/load/load.js';
+import { loadRows, sgDay, inScope, fxDatesFor, splitUntracked, NO_INBOUND_ALERT, UNTRACKED } from '../src/load/load.js';
 import { fetchRates, makeRateLookup, DEFAULT_MARKUP } from '../src/load/fx.js';
 
 const USAGE = `actual-mail-load - normalised transaction rows on stdin -> Actual Budget
@@ -175,6 +175,63 @@ if (orphanLicences.length) {
     + 'digits, so they are not put in this message.');
   local(`mapping.json has ${orphanLicences.length} inert ${NO_INBOUND_ALERT} entry(ies):`);
   for (const k of orphanLicences) local(`  ${k}`);
+}
+
+// Every legal prefixed key shape, and the list is closed. A key like `untraked:wise-aud` is not
+// a licence, so the ordinary `wise-aud` key beside it still resolves and the row is FX-converted
+// into an account it does not belong in — money invented, run reports success. There is no fuzzy
+// match for a typo, but there does not need to be: three prefixes are legal and anything else is
+// a mistake. Refusing beats warning, because a warning still writes the money. Checked against
+// the constants the loader itself honours, so this cannot drift from them.
+const PREFIXES = ['pot:', NO_INBOUND_ALERT, UNTRACKED];
+const badPrefix = Object.keys(mapping)
+  .filter((k) => k.includes(':') && !PREFIXES.some((p) => k.startsWith(p)));
+if (badPrefix.length) {
+  console.error(`mapping.json has ${badPrefix.length} key(s) with an unrecognised prefix. Legal `
+    + `prefixes are ${PREFIXES.join(' ')}. Each is inert, and an inert ${UNTRACKED} licence means `
+    + 'the row it should have set aside is imported instead. The keys themselves are on stdout, on '
+    + 'this host — they can carry account digits, so they are not put in this message.');
+  local(`mapping.json has ${badPrefix.length} key(s) with an unrecognised prefix:`);
+  for (const k of badPrefix) local(`  ${k}`);
+  process.exit(1);
+}
+
+// An `untracked:` key names no account, so its value must be null. A stray id there is not
+// merely untidy: `Object.values(mapping)` drives the dedupe read, and a non-null value makes the
+// loader ask Actual for the transactions of an account that need not exist.
+// A pot target cannot be untracked: splitUntracked matches a row's SOURCE account, so the key
+// can never fire, and a pot move is two-sided anyway — excluding one side of it is already a
+// contradiction. Grouped with the value check because both are the same mistake, a key that
+// looks live in the file and does nothing.
+const untrackedPots = Object.keys(mapping)
+  .filter((k) => k.startsWith(UNTRACKED) && k.slice(UNTRACKED.length).includes(':'));
+if (untrackedPots.length) {
+  console.error(`mapping.json has ${untrackedPots.length} "${UNTRACKED}" key(s) over a prefixed `
+    + 'key. A pot target cannot be untracked — the licence matches the row source account, so '
+    + 'the key never fires. The keys are on stdout, on this host.');
+  local(`mapping.json has ${untrackedPots.length} ${UNTRACKED} key(s) over a pot target:`);
+  for (const k of untrackedPots) local(`  ${k}`);
+  process.exit(1);
+}
+
+const untrackedWithValue = Object.keys(mapping)
+  .filter((k) => k.startsWith(UNTRACKED) && mapping[k] !== null);
+if (untrackedWithValue.length) {
+  console.error(`mapping.json has ${untrackedWithValue.length} "${UNTRACKED}" key(s) whose value `
+    + 'must be null — the account is outside the budget, so there is no id to name. The keys are '
+    + 'on stdout, on this host.');
+  local(`mapping.json has ${untrackedWithValue.length} ${UNTRACKED} key(s) that must be null:`);
+  for (const k of untrackedWithValue) local(`  ${k}`);
+  process.exit(1);
+}
+
+// Positive confirmation that the mechanism is configured. Without it "on, and nothing matched
+// today" and "nobody ever added the key" are byte-identical, which is how a fix ships switched
+// off and stays that way. Names go to stdout with every other mapping key, never to the alert.
+const untrackedKeys = Object.keys(mapping).filter((k) => k.startsWith(UNTRACKED));
+if (untrackedKeys.length) {
+  local(`${untrackedKeys.length} untracked source account(s) in force:`);
+  for (const k of untrackedKeys) local(`  ${k.slice(UNTRACKED.length)}`);
 }
 
 // Completeness check on the mapping, over the rows that will actually be written. Reporting

@@ -152,6 +152,17 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   // rate lookup. Counted separately from `skipped`, which means "already reconciled" and is a
   // different fact about a different row.
   const { tracked, untracked } = splitUntracked(rows, mapping);
+  // A pot move is two-sided by definition, and the pot side is inside the budget. Setting one
+  // aside because the account it LEFT is untracked would lose an arrival that really happened —
+  // the quiet loss this loader exists to prevent — so it is a hard error, exactly as an unmapped
+  // account is. Unreachable on a mapping where the untracked accounts are foreign-currency
+  // balances and the pots belong to one bank, which is why it is pinned rather than assumed.
+  for (const row of untracked) {
+    if (row.type === 'pot_transfer' && mapping[`pot:${row.payee}`]) {
+      throw new Error(`row leaves untracked account "${row.account}" but its pot "${row.payee}" `
+        + 'is in the budget — one side of a pot move cannot be untracked');
+    }
+  }
   const scoped = inScope(tracked, reconciledThrough);
   const skipped = tracked.length - scoped.length;
 
@@ -275,7 +286,12 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   // size against a silent doubling. If batches ever grow, index candidates by currency and
   // absolute minor amount instead of comparing every row with every other.
   const inScopeIds = new Set(scoped.map((r) => r.id));
-  const all = canTransfer ? pairRows(rows, mapping) : { pairs: [], contested: new Set() };
+  // `tracked`, not `rows`: an untracked row is never written, so Actual can never mirror it
+  // and it can never be the counterpart this pass is looking for. Counting it as evidence
+  // silently downgraded a real internal transfer to an ordinary spend, with no `ambiguous`
+  // and no `left unlinked` count to show it. It still sees rows the FLOOR skipped, which is
+  // what this second pass is for — splitUntracked runs before inScope, so that is unchanged.
+  const all = canTransfer ? pairRows(tracked, mapping) : { pairs: [], contested: new Set() };
   for (const id of all.contested) refused.add(id);
   for (const { out, into } of all.pairs) {
     if (inScopeIds.has(out.id) !== inScopeIds.has(into.id)) {

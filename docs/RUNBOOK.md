@@ -52,6 +52,20 @@ streak to a six-run window, so the old per-source state files are dead. `rm -f
 <deploy-dir>/.fail-streak-*` after step 2. Nothing reads them, so leaving them is harmless
 rather than wrong — but they will sit in the deploy directory forever otherwise.
 
+**One-off, upgrading past 2026-08-28:** the code half of untracked source accounts ships with
+the push, but the half that turns it on is `mapping.json`, which is gitignored and lives only on
+the deploy host. **Edit it in the same maintenance window as the pull**, or the run behaves
+exactly as before and nothing says so. Add one `"untracked:<key>": null` per non-base-currency
+balance — with a single SGD Wise account that means `untracked:wise-aud` and `untracked:wise-usd`,
+not just the one that has already cost you a row. Confirm with the `untracked source account(s)
+in force` line on stdout at the start of the next run.
+
+**Rollback ordering for that change:** if you revert the code, restore the ordinary `wise-<ccy>`
+keys *before* reverting, or put them back straight after. A mapping carrying only `untracked:`
+keys against the old code has no key for those accounts at all, and the loader treats an unmapped
+account as a hard error — so every hourly run exits 1 until someone notices. Leaving the
+`untracked:` keys in place under old code is harmless; they are simply ignored.
+
 **Also one-off, and it breaks step 2:** this repo was republished from a fresh root commit, so a
 clone made before that has no common ancestor with it and `git pull --ff-only` fails with
 `refusing to merge unrelated histories`. Do not force the merge — re-clone into a new directory

@@ -324,18 +324,35 @@ account, denominated in one currency. Point `wise-aud` at that SGD account and a
 is converted at the day's rate and written as an SGD debit that never happened. Two of those had
 to be deleted by hand before this existed.
 
+**Give one entry per non-base balance, not just the one that has bitten you.** Every
+`wise-<currency>` key other than your base currency needs its own `untracked:` entry, or the
+first movement in the currency you skipped invents a debit exactly as the others did. The keys
+in force are printed on stdout at the start of each run so you can see which ones you have.
+
 Leaving the key out instead is not the same thing. An unmapped account is a hard error, on
 purpose, so one AUD movement would fail the whole run rather than one row. `untracked:` is the
 way to say *deliberately absent* rather than *forgotten*.
 
 Rows from an untracked account are set aside before anything else looks at them: before the
 reconciliation floor, before transfer pairing, and before any FX rate is fetched. They are
-counted on the run line as `N untracked`, never silently dropped — a mistyped key shows up as
-rows going missing rather than as silence. A rate outage cannot fail a run whose only foreign
-rows are untracked ones.
+counted on the run line as `N untracked`, never silently dropped. A rate outage cannot fail a
+run whose only foreign rows are untracked ones.
 
 The licence beats an ordinary key rather than replacing it, so a `wise-aud` entry left over from
-before is inert rather than contradictory. Removing it is tidier, and changes nothing.
+before is inert rather than contradictory: removing it is tidier and changes nothing, and there
+is a test that runs both mappings and compares the counts, because "changes nothing" is the kind
+of claim that quietly stops being true.
+
+A **typo is refused rather than absorbed**, and it has to be, because the failure is not a
+missing import but an invented one: `untraked:wise-aud` is not a licence, so the ordinary key
+beside it still resolves and the row is converted into the wrong account with the run reporting
+success. The mapping has exactly three legal prefixes — `pot:`, `no-inbound-alert:`,
+`untracked:` — and any other prefixed key stops the run. So does an `untracked:` key whose value
+is not `null`, and one written over a pot target, which could never have fired.
+
+`untracked:` names a row's **source account**, never a pot. A pot move is two-sided and the pot
+itself is inside the budget, so a pot move out of an untracked account is a hard error rather
+than a row set quietly aside — the money really did arrive in the pot.
 
 Pot moves are written as **two-sided transfers** rather than spends. The row's payee becomes
 the target account's transfer payee, so the money leaves one account and arrives in the other

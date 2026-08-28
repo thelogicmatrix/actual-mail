@@ -990,3 +990,56 @@ test('splitUntracked partitions rows so the FX date list never carries an untrac
   assert.deepEqual(fxDatesFor(tracked), []);
   assert.deepEqual(fxDatesFor([sgdRow, AUD_ROW]), ['2026-07-28']);
 });
+
+// An untracked source account in the base currency, resolving to an account of its OWN. Both
+// details matter: pairing needs the same currency and two DIFFERENT resolved account ids, so a
+// fixture whose untracked key points at the same account as the licensed row can never pair and
+// proves nothing. `cash` rather than `wise-aud` because the Wise keys share the Wise account.
+const UNTRACKED_XFER = { ...XFER_MAPPING, cash: 'ACCT_C', 'untracked:cash': null };
+
+test('an untracked row is not evidence against a licence', async () => {
+  // The licence stands down when the same run holds a row the licensed one pairs or contests
+  // with, because that row is the receiving bank's own alert and Actual will mirror it. An
+  // untracked row is NEVER written, so it can never be that counterpart — treating it as one
+  // silently downgrades a real internal transfer to an ordinary spend, with no `ambiguous` and
+  // no `left unlinked` count to show it happened. Both pairing passes must see the same rows.
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'solo', account: 'main', amount: '-1.37', payee: 'A/C ending 0000' }),
+     xrow({ id: 'ghost', account: 'cash', amount: '1.37', payee: 'somebody' })],
+    UNTRACKED_XFER, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.untracked, 1);
+  assert.equal(r.transfers, 1, 'the licensed transfer must still be booked');
+  assert.equal(api.written.get('ACCT_A').find((t) => t.imported_id === 'xsolo').payee,
+    'payee-of-ACCT_B');
+});
+
+test('a leftover ordinary key beside an untracked one really does change nothing', async () => {
+  // README says exactly this, so it is pinned. Without it the claim rests on the leftover key
+  // never making the untracked row a pairing candidate, which is not obvious from either file.
+  const withoutLeftover = { ...XFER_MAPPING, 'untracked:cash': null };
+  const rows = () => [
+    xrow({ id: 'solo', account: 'main', amount: '-1.37', payee: 'A/C ending 0000' }),
+    xrow({ id: 'ghost', account: 'cash', amount: '1.37', payee: 'somebody' })];
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+  const a = await loadRows(rows(), UNTRACKED_XFER, sink(), () => null, opts);
+  const b = await loadRows(rows(), withoutLeftover, sink(), () => null, opts);
+  assert.deepEqual(
+    { imported: a.imported, untracked: a.untracked, transfers: a.transfers },
+    { imported: b.imported, untracked: b.untracked, transfers: b.transfers });
+});
+
+test('a pot move out of an untracked account is a hard error, not a silent nothing', async () => {
+  // The pot is inside the budget even when the account the money left is not, so setting the row
+  // aside loses an arrival that really happened. Same doctrine as an unmapped account: a row this
+  // tool cannot place is a loud failure, never a quiet skip. Unreachable on today's mapping —
+  // pots belong to one bank and the untracked accounts are Wise balances — which is exactly why
+  // it needs writing down rather than discovering the first time it fires.
+  await assert.rejects(
+    () => loadRows(
+      [{ ...ROW, id: 'potout', account: 'cash', type: 'pot_transfer', payee: 'Buffer' }],
+      { '0000': 'uuid-a', 'pot:Buffer': 'uuid-pot', 'untracked:cash': null },
+      fakeApi(), () => null, { transferPayeeFor: (id) => `payee-of-${id}` }),
+    /untracked account "cash" but its pot "Buffer" is in the budget/);
+});
