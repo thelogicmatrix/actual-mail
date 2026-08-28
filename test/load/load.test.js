@@ -1239,3 +1239,79 @@ test('a pair already linked by hand is not reported as left unlinked, every run,
   assert.equal(r.transfersAlreadySeparate, 0, 'it is linked, so nothing is left unlinked');
   assert.equal(r.imported, 0, 'and neither leg is written');
 });
+
+// --- the mirrored leg Actual creates is not cleared ---------------------------------------
+//
+// Measured against a throwaway budget on 2026-08-28: addTransactions with runTransfers makes the
+// counterpart leg with `cleared: false`, whatever the written leg says. So every transfer this
+// loader books left one side unchecked, and three pot moves had been sitting like that since
+// July. The alert IS the bank confirming the movement — both sides happened — so both sides are
+// cleared, exactly as `toActualTxn` already argues for the leg it writes.
+
+function clearingSink(seed = new Map()) {
+  const s = deletingSink(seed);
+  s.updated = [];
+  s.updateTransaction = async (id, fields) => {
+    s.updated.push([id, fields]);
+    for (const [acct, txns] of s.written) {
+      s.written.set(acct, txns.map((t) => (t.id === id ? { ...t, ...fields } : t)));
+    }
+  };
+  return s;
+}
+
+test('the mirrored leg of a booked transfer is cleared', async () => {
+  const api = clearingSink();
+  // Stand in for Actual: the moment the transfer is written, the counterpart appears uncleared.
+  const addTransactions = api.addTransactions;
+  api.addTransactions = async (acct, txns, opts) => {
+    await addTransactions(acct, txns, opts);
+    for (const t of txns.filter((x) => x.payee)) {
+      api.written.set('ACCT_A', [...(api.written.get('ACCT_A') ?? []), {
+        id: 'mirror-1', amount: -t.amount, date: t.date, transfer_id: 'x', cleared: false,
+      }]);
+    }
+  };
+  const r = await loadRows(PAIR_ROWS(), XFER_MAPPING, api, () => null, XOPTS);
+  assert.equal(r.transfers, 1);
+  assert.deepEqual(api.updated, [['mirror-1', { cleared: true }]]);
+});
+
+test('an already cleared mirror is left alone, so a re-run does not churn', async () => {
+  const api = clearingSink();
+  const addTransactions = api.addTransactions;
+  api.addTransactions = async (acct, txns, opts) => {
+    await addTransactions(acct, txns, opts);
+    for (const t of txns.filter((x) => x.payee)) {
+      api.written.set('ACCT_A', [...(api.written.get('ACCT_A') ?? []), {
+        id: 'mirror-1', amount: -t.amount, date: t.date, transfer_id: 'x', cleared: true,
+      }]);
+    }
+  };
+  await loadRows(PAIR_ROWS(), XFER_MAPPING, api, () => null, XOPTS);
+  assert.deepEqual(api.updated, []);
+});
+
+test('a row that is not our mirror is never cleared', async () => {
+  // Only a row with no imported_id (so Actual made it), carrying a transfer_id, on the transfer's
+  // own date and exactly opposite its amount. A hand-entered uncleared row is the user's business.
+  const api = clearingSink();
+  const addTransactions = api.addTransactions;
+  api.addTransactions = async (acct, txns, opts) => {
+    await addTransactions(acct, txns, opts);
+    api.written.set('ACCT_A', [...(api.written.get('ACCT_A') ?? []), {
+      id: 'theirs', amount: 12345, date: '2026-08-27', transfer_id: 'y', cleared: false,
+    }, {
+      id: 'imported-elsewhere', amount: 70000, date: '2026-08-27',
+      imported_id: 'someone-else', transfer_id: 'z', cleared: false,
+    }]);
+  };
+  await loadRows(PAIR_ROWS(), XFER_MAPPING, api, () => null, XOPTS);
+  assert.deepEqual(api.updated, [], 'neither a different amount nor an imported row is ours');
+});
+
+test('a caller whose api cannot update simply does not clear mirrors', async () => {
+  const api = deletingSink();
+  const r = await loadRows(PAIR_ROWS(), XFER_MAPPING, api, () => null, XOPTS);
+  assert.equal(r.transfers, 1, 'and the transfer is still booked');
+});

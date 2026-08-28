@@ -204,3 +204,12 @@ back-fill date.
 - Status: built 2026-08-28, hardened the same day after an adversarial review that found the two-accounts case. Nine unit tests and two CLI tests, including one proving a dry run deletes nothing and does not claim to have.
 - `scripts/verify-scratch.js` now maps Wise balances to a second Actual account. It mapped every source account to one, and `pairRows` requires two different resolved accounts, so the transfer path and then the delete path were **categorically unreachable** in the only script that runs against a real Actual budget: both rested entirely on a hand-written stub. The script now imports one leg of a pair alone, imports everything, and asserts the stale row is gone, one joined transfer exists, and a third pass changes nothing. Verified live on 2026-08-28 over the 27 and 28 August archives.
 - The `bin` success-path sync gate is `imported > 0 || transfersRelinked > 0`, matching the one inside `loadRows`. A deletion left unsynced sits in the local cache the next run's dedupe reads, so the run after it reports healthy over a budget the server never saw.
+
+## The mirrored leg of a transfer is cleared
+
+- Actual's `addTransactions(..., { runTransfers: true })` creates the counterpart leg with `cleared: false` regardless of the written leg's flag. Measured on 2026-08-28 against a throwaway local budget, and confirmed in the live one: every pot move the loader booked between 2026-07-29 and 2026-08-12 had a cleared source leg and an unchecked mirror in the pot. Nathan spotted it in the UI, not in any log.
+- The loader now clears its own mirrors after the write. The reasoning is the one `toActualTxn` already makes for the leg it writes: the alert is the bank confirming the movement, and both sides of a transfer happened, so `cleared` means "the bank did this" on both.
+- Deliberately narrow about ownership: no `imported_id` (Actual made it, no importer did), a `transfer_id`, the transfer's own date, and exactly the opposite amount. A hand-entered row left unchecked on purpose is the user's business. The pass only ever SETS the flag, so it is idempotent and a re-run is a no-op.
+- Optional api capability, like deleting: a caller without `updateTransaction` still books the transfer and simply does not clear.
+- Counted as `N mirror(s) cleared` rather than done silently, because a count that stays non-zero run after run would mean the flag is not sticking.
+- Status: built 2026-08-28. Four unit tests plus a CLI test proving a dry run does not write the flag either.

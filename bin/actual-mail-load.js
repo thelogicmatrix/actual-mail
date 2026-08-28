@@ -354,6 +354,9 @@ try {
     // the rehearsal proves nothing about the path the real run will take. Reporting is left to
     // onDelete below, so there is exactly one line per deletion and it is in the right tense.
     deleteTransaction: async () => {},
+    // Inert, like the delete. The METHOD has to exist or loadRows skips the mirror-clearing pass
+    // entirely and the rehearsal stops matching the real run.
+    updateTransaction: async () => {},
     addTransactions: async (accountId, txns) => {
     for (const t of txns) {
       local(`DRY ${t.date} ${String(t.amount).padStart(9)}  ${accountId}  `
@@ -373,7 +376,8 @@ try {
       + '  (stale leg, replaced by a transfer)');
 
   const { imported, converted, skipped, alreadyPresent, untracked,
-          transfers, transfersAlreadySeparate, transfersRelinked, ambiguous } = await loadRows(
+          transfers, transfersAlreadySeparate, transfersRelinked, mirrorsCleared,
+          ambiguous } = await loadRows(
     rows, mapping, dryRun ? sink : api, rateLookup,
     { reconciledThrough, transferPayeeFor, onTransfer, onDelete });
 
@@ -391,6 +395,9 @@ try {
     // the transfer count, because "2 transfers" and "2 transfers, one of which replaced a
     // row you had categorised" are different facts.
     + `${transfersRelinked ? `, ${transfersRelinked} transfer(s) relinked` : ''}`
+    // Actual makes the counterpart leg unchecked. Counted rather than silent, because a
+    // number that stays non-zero forever would mean the clearing pass is not sticking.
+    + `${mirrorsCleared ? `, ${mirrorsCleared} mirror(s) cleared` : ''}`
     // At least one leg was already in the budget — an ordinary transaction, a transfer leg
     // written under an older mapping, or a row in another account — so the pair was refused
     // rather than linked — linking would mean editing a transaction already there. The

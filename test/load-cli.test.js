@@ -132,6 +132,12 @@ export const getPayees = async () => [
 export const getTransactions = async (accountId) =>
   JSON.parse(process.env.STUB_EXISTING || '{}')[accountId] || [];
 export const addTransactions = async (id, txns) => txns.map((t) => t.imported_id);
+export const updateTransaction = async (id, fields) => {
+  if (process.env.STUB_UPDATES) {
+    const { appendFileSync } = await import('node:fs');
+    appendFileSync(process.env.STUB_UPDATES, id + ':' + JSON.stringify(fields) + String.fromCharCode(10));
+  }
+};
 export const deleteTransaction = async (id) => {
   if (process.env.STUB_DELETES) {
     const { appendFileSync } = await import('node:fs');
@@ -588,4 +594,16 @@ test('a real run deletes the stale leg and counts the relink', () => {
   assert.equal(r.status, 0, r.stderr);
   assert.equal(readFileSync(deletes, 'utf8').trim(), 'existing-1');
   assert.match(r.stderr, /1 transfer\(s\) relinked/);
+});
+
+test('a dry run does not clear a mirror either', () => {
+  // Same principle as the delete: a rehearsal writes nothing at all, including a flag.
+  const updates = join(TMP, 'updates-dry.log');
+  writeFileSync(updates, '');
+  const r = run(RELINK_ROWS, {
+    STUB_EXISTING: RELINK_EXISTING, STUB_UPDATES: updates,
+    ACTUAL_MAIL_RECONCILED_THROUGH: '2026-07-01',
+  }, { stub: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(updates, 'utf8'), '', 'a dry run must not update a transaction');
 });

@@ -370,6 +370,22 @@ unmapped-account error instead, which is the better reason to follow the instruc
 itself is inside the budget, so a pot move out of an untracked account is a hard error rather
 than a row set quietly aside — the money really did arrive in the pot.
 
+### The mirrored leg is cleared
+
+A transfer is one transaction with a transfer payee; Actual creates the counterpart itself. It
+creates it **unchecked**, whatever the leg we wrote says, so every transfer this loader booked
+used to leave one side uncleared. Measured against a throwaway budget, and visible in a real one:
+three pot moves had been sitting half-checked since July.
+
+The loader now clears it, and is narrow about what counts as its own: no `imported_id` (so Actual
+made it, not an importer), a `transfer_id`, the transfer's own date, and exactly the opposite
+amount. A row you left unchecked on purpose is your business. It only ever sets the flag, never
+clears it, so a re-run does nothing and the `N mirror(s) cleared` count staying non-zero would
+mean the pass is not sticking.
+
+The reasoning is the same one `toActualTxn` already makes for the leg it writes: the alert is the
+bank confirming the movement, and both sides of a transfer happened.
+
 ### When one leg arrived in an earlier run
 
 The two legs of one transfer routinely arrive separately. A Trust alert is an email and the Wise

@@ -137,6 +137,7 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   let transfers = 0;
   let transfersAlreadySeparate = 0;
   let transfersRelinked = 0;
+  let mirrorsCleared = 0;
 
   // The floor is applied HERE rather than inside the loop, because transfer pairing must see
   // exactly the rows that will be written. A pair whose other leg is already reconciled is
@@ -328,6 +329,10 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   // two-method api, and that must keep the old reporting behaviour rather than throw on a
   // missing method. scripts/verify-scratch.js passes the whole module, so it does delete.
   const canDelete = typeof api.deleteTransaction === 'function';
+  // Clearing the mirror is optional capability too, for the same reason deleting is: an
+  // external caller may pass an api without it, and the transfer must still be booked.
+  const canClear = typeof api.updateTransaction === 'function';
+  const mirrors = [];
   // Pairs already linked in the budget under their own single ids. Both legs are accounted
   // for — one as the row itself, the other as the mirror Actual made — so neither is written.
   const alreadyLinked = new Set();
@@ -558,6 +563,27 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
         if (!to) continue;
         transfers += 1;
         onTransfer({ date: t.date, amount: t.amount, from: accountId, to });
+        mirrors.push({ account: to, date: t.date, amount: -t.amount });
+      }
+    }
+
+    // Actual makes the counterpart leg with `cleared: false`, whatever the leg we wrote says —
+    // measured against a throwaway budget on 2026-08-28. So every transfer this loader booked
+    // left one side unchecked, and three pot moves had been sitting that way since July. The
+    // alert IS the bank confirming the movement and both sides of it happened, which is the same
+    // argument toActualTxn already makes for the leg it writes.
+    //
+    // Deliberately narrow about what counts as ours: no `imported_id` (so Actual made it, not an
+    // importer), a `transfer_id` (so it is a transfer leg), the transfer's own date, and exactly
+    // the opposite amount. A hand-entered row someone left unchecked on purpose is their
+    // business. Only ever sets cleared, never unsets it, so a re-run is a no-op.
+    if (canClear) {
+      for (const m of mirrors) {
+        for (const t of await api.getTransactions(m.account, m.date, m.date)) {
+          if (t.imported_id || !t.transfer_id || t.cleared || t.amount !== m.amount) continue;
+          await api.updateTransaction(t.id, { cleared: true });
+          mirrorsCleared += 1;
+        }
       }
     }
   } catch (e) {
@@ -579,5 +605,5 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
     throw e;
   }
   return { imported, converted, skipped, alreadyPresent, untracked: untracked.length,
-           transfers, transfersAlreadySeparate, transfersRelinked, ambiguous };
+           transfers, transfersAlreadySeparate, transfersRelinked, mirrorsCleared, ambiguous };
 }
