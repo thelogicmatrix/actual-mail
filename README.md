@@ -388,16 +388,30 @@ changes go with it. Every deletion is named on stdout, and the count is separate
 in the run line, because "2 transfers" and "2 transfers, one of which replaced a row you had
 categorised" are different facts.
 
-Two cases are refused and fall back to reporting `left unlinked`:
+**Seven cases are refused** and fall back to reporting `left unlinked`. Every one costs a link and
+nothing else, which is the trade: a missing link is an annoyance, a wrong delete is money or work
+you cannot get back.
 
-- the existing row is **reconciled** — you have balanced that period, and deleting a row would
-  unbalance it
-- the existing row is **already part of a transfer** — it is not stale
+- the existing row is **reconciled** — you have balanced that period, and deleting would unbalance it
+- it is **already part of a transfer** — it is not stale
+- it is a **split parent** — deleting it deletes every category you typed into the split
+- its `imported_id` is the **joined** form — it stands for two source rows, so replacing it with a
+  pair covering one of them loses the other
+- it **satisfies a schedule** — deleting it shows that schedule as unpaid again
+- the same source row is **present in more than one account**, which happens after a mapping
+  change. Deleting one copy and writing the transfer over the top leaves the other copy plus
+  Actual's mirrored leg, and the amount is counted twice
+- the replacement write would be **filtered by a legacy digest** in the target account, which
+  would leave you with a deletion and nothing written
 
 Relinking needs an api that can delete. An external caller supplying only `getTransactions` and
-`addTransactions` keeps the old reporting behaviour rather than failing. `scripts/verify-scratch.js`
-passes the whole Actual module, so it does exercise this path, against the throwaway budget it
-builds.
+`addTransactions` keeps the old reporting behaviour rather than failing.
+
+`scripts/verify-scratch.js` exercises this against a real Actual budget: it maps Wise balances to
+their own account so a pair can form at all, imports one leg alone, then imports everything, and
+asserts the stale row is gone, one joined transfer exists, and a third pass changes nothing. That
+matters because a stub is written from the same model as the code, and this feature already
+shipped one behaviour no stub predicted.
 
 The rule for what counts as a pair is unchanged and deliberately narrow: two minutes, same
 currency, equal and opposite, two different resolved accounts. Widening it to catch legs further
@@ -570,10 +584,8 @@ substitute for reading your own diff. It catches shapes, not everything.
 
    The legs no longer have to land in the **same** run. When one is already in your budget the
    pair is relinked, which means **the loader deletes that row** and writes the transfer fresh.
-   That is the one place this tool removes something you may have edited, and it refuses to do it
-   to a reconciled row, a row already part of a transfer, a split parent, a row standing for two
-   source rows, or a row that exists in more than one account. See "When one leg arrived in an
-   earlier run" above.
+   That is the one place this tool removes something you may have edited. It refuses in seven
+   cases, listed under "When one leg arrived in an earlier run" above.
 
    The `transfer(s) left unlinked` count is narrower than it sounds: it counts only pairs the
    loader **found** and then refused because one leg was already imported. A run that sees one
