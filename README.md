@@ -12,9 +12,9 @@ into YNAB, Firefly III, Beancount or a spreadsheet just as happily.
 
 Probably not yet, and that is the honest answer rather than a disclaimer.
 
-Bundled sources: **Trust Bank (Singapore)**, via alert email; **Wise**, via its API rather than
-email. Only the first is a *parser* — Wise returns structured data, so there is no mail to parse
-and no fixture to redact.
+Bundled sources: **Trust Bank (Singapore)** and **UOB (Singapore)**, both via alert email;
+**Wise**, via its API rather than email. Only the first two are *parsers* — Wise returns
+structured data, so there is no mail to parse and no fixture to redact.
 
 Every bank writes its own alert emails and changes them without notice, so nobody can promise
 this works for an arbitrary bank. What it does promise:
@@ -255,13 +255,62 @@ check. It lists every missing key at once.
   "main": "<actual account id>",
   "0000": "<actual account id>",
   "wise-sgd": "<actual account id>",
-  "pot:Buffer": "<actual account id>"
+  "pot:Buffer": "<actual account id>",
+  "no-inbound-alert:0000": "<actual account id>"
 }
 ```
 
-Four shapes appear there, and `mapping.example.json` shows all of them: a named account a
+Five shapes appear there, and `mapping.example.json` shows all of them: a named account a
 parser chose (`card`, `main`), the last four digits of an account the alert email quoted, a
-Wise currency balance (`wise-<currency>` in lower case), and `pot:<Pot Name>` for a savings pot.
+Wise currency balance (`wise-<currency>` in lower case), `pot:<Pot Name>` for a savings pot,
+and `no-inbound-alert:<key>` described below.
+
+`no-inbound-alert:<key>` records one measurement: **that bank sends you no alert when money
+arrives.** Its value is the same account id `<key>` itself maps to.
+
+An alert whose payee names one of your own accounts ("A/C ending 0000") describes both sides of
+a transfer in one email, and this is what lets the far side be booked from it. That is only
+safe where the receiving bank cannot send an alert of its own — otherwise its alert imports
+beside the leg already created here and the money arrives twice. So the entry is a licence, and
+you give it by checking: move a small amount in, and confirm nothing arrives from the receiving
+bank while the sending bank's alert does. Without the entry, such a payee is just a payee.
+
+A licence is a claim about a bank, and a row in the same run is that bank's own behaviour.
+**The licence holds unless the same run contains a row this one pairs or contests with.** Every row
+handed to the run counts as evidence, including one the reconciliation floor then skips: an archive
+re-piped after the floor has moved past part of it splits a pair across the floor, and the leg that
+survives must not treat its own counterpart's absence as permission. Two ways
+to be that row. It paired with a counter-leg and the pair was **refused** because one of the two
+legs was already in your budget: the payee is left alone, both rows import separately, and the run
+counts a transfer left unlinked. Or it was **contested** — it had two or more candidate
+counter-legs, or its single candidate had others of its own — which pairing refuses rather than
+guesses at, and the run line reports as ambiguous. Either way the payee stays a payee and no far
+leg is invented. Where the pair is found and neither leg is in the budget, it is simply booked as
+a transfer, one transaction with the transfer payee counted in `transfers`, so the licence is
+bypassed there too, by the evidenced route rather than the claimed one.
+
+A counter-leg that pairing never treated as a candidate at all leaves the licence fully in force,
+and there are four ways to be that: the two legs are more than two minutes apart, they are in
+different currencies, the counter-leg is a **pot** transfer (pot moves have their own path and are
+excluded from pairing), or the legs arrived in different runs. Finding those would mean a general
+search for an opposing row, which was deliberately declined. They are what the licence carries
+alone, and they are why it has to be a measurement rather than an opinion.
+
+One more thing the licence buys, and it is a real cost. A payee is read as naming your own account
+whenever it contains any four-digit group that a mapping key matches, and a mapping key carries no
+bank name — four digits is all a payee gives you. So paying a third party whose account happens to
+end in the same four digits as a licensed account books that spend as an internal transfer: a
+phantom credit appears in your own account and the expense disappears from your budget. Roughly one
+outbound transfer in ten thousand, per licensed account. There is no cheap fix in code, so licence
+only the accounts you actually need, and treat an unexplained credit into a licensed account as
+this until proven otherwise.
+
+`<key>` must be a **four-digit account key** in its own right, since four digits is the only
+thing a payee can name. A `no-inbound-alert:<key>` with no matching `<key>` beside it, or over a
+named key like `main`, is unreachable — the payee is resolved through the ordinary four-digit key
+first — so the licence does nothing and transfers into that account quietly go back to being
+ordinary spends. The loader warns when it finds one, counting them on stderr and naming them on
+stdout, and imports anyway: an inert licence loses a link, not money.
 
 Pot moves are written as **two-sided transfers** rather than spends. The row's payee becomes
 the target account's transfer payee, so the money leaves one account and arrives in the other
@@ -418,8 +467,22 @@ substitute for reading your own diff. It catches shapes, not everything.
    construction, and a domestic row can still settle at a different figure if a hold changes.
    Every estimated row says so in its note. Monthly reconciliation is expected, not
    exceptional.
-2. **Cross-source double counting.** A transfer from a bank account to Wise appears in both
-   feeds. Both sides are imported, and marking it as a transfer in Actual is manual.
+2. **Cross-source double counting, narrowed to one run and to unambiguous pairs.** A transfer
+   between two of your own accounts appears in both feeds. Two legs are paired and written as one
+   two-sided transfer only when they land in the **same** run, in the same currency, within two
+   minutes, non-zero and equal and opposite, resolving to **different** Actual accounts, and each
+   is the other's only candidate. Miss any of those and both rows import as ordinary
+   transactions: legs in different currencies are never paired at all, legs further apart than
+   the window are not candidates, and legs with more than one candidate between them are refused
+   as ambiguous rather than guessed at. Joining any of those up afterwards is yours to do — the
+   loader never edits a transaction already in your budget.
+
+   The `transfer(s) left unlinked` count is narrower than it sounds: it counts only pairs the
+   loader **found** and then refused because one leg was already imported. A run that sees one
+   leg alone counts nothing and says nothing, and the report appears only once a later run's
+   extract window holds both rows again. The bundled seven-day sweep does that for you. A narrow
+   `--since`, or a source down for more than a week, does not — those legs are simply never
+   reported.
 3. **Fees and interest never alert**, so they never enter this feed at all.
 4. **Conversion depends on an external rate service.** Unreachable means the run fails rather
    than importing an unconverted or guessed number.
@@ -434,6 +497,15 @@ substitute for reading your own diff. It catches shapes, not everything.
    as the Quickstart does — takes no lock, so do not do it while a scheduled run may fire. A
    batch is deduplicated against itself, so a doubled *input* is safe; two concurrent *writers*
    are not.
+7. **A scheduled UOB transfer would import as if it had already happened.** UOB uses one template
+   for both, wording it "made/scheduled", with no status field and no second date to read, so the
+   parser cannot tell them apart. A transfer scheduled for a future value date is written with the
+   *scheduling* timestamp as its date, and cancelling it produces no alert this feed can see —
+   UOB's status mail carries no amount, so it is ignored rather than reported as unparsed. Your
+   budget would then hold spend that never happened, with no offsetting row and no signal to
+   notice it by. **Never observed:** all six historical funds transfers in the thirty-message
+   sample this parser was built from were executed immediately, each with a counterparty credit
+   alert stamped to the same minute.
 
 ## Development
 

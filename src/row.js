@@ -38,3 +38,15 @@ export function makeRow({ source, account, date, amount, currency, payee, type, 
 }
 
 export const COLUMNS = ['id', 'source', 'account', 'date', 'amount', 'currency', 'payee', 'type', 'raw_ref'];
+
+// Here rather than in load/load.js, which is where it used to live: load.js imports
+// load/transfers.js, and transfers.js needs this, so leaving it there was a dependency cycle
+// through the money path. This file is the right home regardless — it already owns the rule
+// that an amount is a decimal string and throws on a number, so converting that string to
+// minor units is the same concern, and this file imports nothing from load/.
+export function toMinorUnits(decimalString) {
+  const negative = decimalString.startsWith('-');
+  const [whole, frac = '0'] = decimalString.replace('-', '').split('.');
+  const minor = Number(whole) * 100 + Number(frac.padEnd(2, '0').slice(0, 2));
+  return negative ? -minor : minor;
+}

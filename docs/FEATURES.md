@@ -5,6 +5,7 @@
 | Feature | Status | What it does |
 |---------|--------|--------------|
 | Trust alert-email extraction | 🟢 live | Parses Trust Bank transaction alerts into normalised rows. Four message families across a dozen patterns, three word orders for card spends |
+| UOB Singapore alert emails | 🔵 built | Parses funds transfers, PayNow, NETS QR and ATM withdrawals. A 12-hour clock, two-digit years and two field orders, every shape derived from real mail and pinned by a redacted fixture |
 | Wise API source | 🟢 live | Pulls Wise movements through the real API rather than mail |
 | Unparsed invariant | 🟢 live | Every message parses, is ignored, or fails the run with `UNPARSED` and a non-zero exit. No silent skip |
 | CSV / JSONL output | 🟢 live | `--format csv\|jsonl`. CSV is consumable by YNAB, Firefly III, Beancount or a spreadsheet |
@@ -14,6 +15,7 @@
 | FX conversion | 🟢 live | ECB reference rate, applied only in Part 2. Alert-derived rows carry a measured blended markup, because the settled figure is unknown and the bank's spread is real; API-sourced rows (Wise) convert at mid with no markup, because no spread was charged. Estimated rows are noted as such |
 | Configurable base currency | 🟢 live | `BASE_CURRENCY` (default `SGD`) decides which rows count as foreign, so a non-SGD adopter gets correct conversion. `FX_MARKUP` sets the spread |
 | Pot moves as two-sided transfers | 🟢 live | Money leaves one account and arrives in the other, rather than booking as a spend |
+| Internal transfers detected and booked two-sided | 🔵 built | Two rows within two minutes, same currency, equal and opposite, resolving to different Actual accounts and each the other's only candidate, become one transfer. Ambiguity is refused rather than guessed. A payee naming one of your own accounts books the far side from a single row, but only into an account licensed in `mapping.json` as one whose bank was measured to send no inbound alert |
 | Reconciliation floor | 🟢 live | `ACTUAL_MAIL_RECONCILED_THROUGH` skips settled rows and counts them. Required for a real import |
 | Dry run | 🟢 live | `ACTUAL_MAIL_DRY_RUN=1` runs the same `loadRows` against the same live budget and stubs only the write, so the already-present count is real. Prints `DRY` lines on **stdout** — they carry an amount and a payee, and the loader's stderr is what the alert reason is derived from — and drops the mandatory reconciliation floor |
 | Cleared-on-import | 🟢 live | Rows land cleared |

@@ -2,7 +2,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as api from '@actual-app/api';
-import { loadRows, sgDay, inScope, fxDatesFor } from '../src/load/load.js';
+import { loadRows, sgDay, inScope, fxDatesFor, NO_INBOUND_ALERT } from '../src/load/load.js';
 import { fetchRates, makeRateLookup, DEFAULT_MARKUP } from '../src/load/fx.js';
 
 const USAGE = `actual-mail-load - normalised transaction rows on stdin -> Actual Budget
@@ -142,6 +142,41 @@ if (reconciledThrough && reconciledThrough >= today) {
   process.exit(1);
 }
 
+// A licence with no account behind it. `no-inbound-alert:<key>` only does anything when `<key>`
+// is itself mapped: pairing resolves a payee-named account through the ordinary key first, so an
+// orphan licence is INERT — transfers into that account quietly go back to being ordinary spends
+// and the operator sees a healthy run that has simply stopped detecting them. Silent failure in a
+// money path is the class of bug this tool exists to prevent, and nothing else reports it: the
+// `needed` set below is built from row-derived keys and never walks the mapping.
+//
+// A warning, not a refusal. An inert licence loses a LINK, never money — both legs still import
+// as ordinary transactions, and the far leg is one that was never going to be invented anyway.
+// Exiting would stop a whole run of otherwise correct imports over a typo in an optional entry,
+// which trades a real loss for a cosmetic one. It also runs before the completeness refusal
+// below so one run reports every mapping problem at once, the same promise that check makes.
+//
+// The key's SHAPE is checked as well as its presence. `namedAccount` in src/load/transfers.js
+// matches `a/c ending <four digits>` and can only ever hand back a four-digit group, so a licence
+// over any other key — `no-inbound-alert:main`, say — is just as inert however well `main` itself
+// is mapped, and a presence test alone waves it through. The truthiness test is left as it is on
+// purpose: it mirrors `namedAccount`'s own `mapping[m[1]]` lookup, and making those two disagree
+// is how this check starts reporting a problem the loader does not have.
+const orphanLicences = Object.keys(mapping).filter((k) => {
+  if (!k.startsWith(NO_INBOUND_ALERT)) return false;
+  const key = k.slice(NO_INBOUND_ALERT.length);
+  return !/^\d{4}$/.test(key) || !mapping[key];
+});
+if (orphanLicences.length) {
+  // Same split as the missing-key check below: the shape of the problem on stderr, the keys
+  // themselves on stdout, because a key here is an account's last four digits.
+  console.error(`mapping.json has ${orphanLicences.length} "${NO_INBOUND_ALERT}" entry(ies) whose `
+    + 'account key is not a four-digit key in the mapping. Each is inert, so transfers into that '
+    + 'account are NOT being detected. The keys themselves are on stdout, on this host — they are account '
+    + 'digits, so they are not put in this message.');
+  local(`mapping.json has ${orphanLicences.length} inert ${NO_INBOUND_ALERT} entry(ies):`);
+  for (const k of orphanLicences) local(`  ${k}`);
+}
+
 // Completeness check on the mapping, over the rows that will actually be written. Reporting
 // every missing key at once beats discovering them one hard error at a time. inScope() lives in
 // load.js so it cannot disagree with loadRows about which rows are in scope.
@@ -226,12 +261,30 @@ try {
     }
   } };
 
-  const { imported, converted, skipped, alreadyPresent } = await loadRows(
-    rows, mapping, dryRun ? sink : api, rateLookup, { reconciledThrough, transferPayeeFor });
+  // Every transfer names an amount and two accounts, so it goes to stdout. stderr becomes a
+  // Discord webhook body under run.sh — see the note at the top of this file.
+  const onTransfer = ({ date, amount, from, to }) =>
+    local(`TRANSFER ${date} ${String(amount).padStart(9)}  ${from} -> ${to}`);
+
+  const { imported, converted, skipped, alreadyPresent,
+          transfers, transfersAlreadySeparate, ambiguous } = await loadRows(
+    rows, mapping, dryRun ? sink : api, rateLookup,
+    { reconciledThrough, transferPayeeFor, onTransfer });
 
   const tail = `${converted ? `, ${converted} FX-estimated` : ''}`
     + `${skipped ? `, ${skipped} skipped as reconciled` : ''}`
-    + `${alreadyPresent ? `, ${alreadyPresent} already present` : ''}`;
+    + `${alreadyPresent ? `, ${alreadyPresent} already present` : ''}`
+    + `${transfers ? `, ${transfers} transfer(s)` : ''}`
+    // At least one leg was already in the budget — an ordinary transaction, a transfer leg
+    // written under an older mapping, or a row in another account — so the pair was refused
+    // rather than linked — linking would mean editing a transaction already there. The
+    // other leg, if it was new, IS written and counted in `imported`. Not "already imported
+    // separately": that wording says both legs are present, which was the reading that hid a
+    // dropped leg for a whole release.
+    + `${transfersAlreadySeparate ? `, ${transfersAlreadySeparate} transfer(s) left unlinked` : ''}`
+    // Same amount, same window, more than one candidate. Left as ordinary transactions
+    // rather than guessed at.
+    + `${ambiguous ? `, ${ambiguous} ambiguous, left unpaired` : ''}`;
   // Sync BEFORE claiming the import happened. api.shutdown() does sync, but wrapped in its own
   // `catch {}` — so a down server, an expired password or a rejected sync gave a success message,
   // exit 0 and a healthy heartbeat over an empty budget. Worse on the next run: the dedupe reads

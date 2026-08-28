@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { toActualTxn, toMinorUnits, loadRows, sgDay, inScope, fxDatesFor } from '../../src/load/load.js';
+import { toActualTxn, loadRows, sgDay, inScope, fxDatesFor } from '../../src/load/load.js';
 import { makeRateLookup, DEFAULT_MARKUP } from '../../src/load/fx.js';
-import { rowId } from '../../src/row.js';
+import { rowId, toMinorUnits } from '../../src/row.js';
 
 // ROW is an SGD row, so every test built on it describes DEFAULT base-currency behaviour.
 // Pinned rather than inherited: a non-SGD adopter with BASE_CURRENCY exported would
@@ -521,4 +521,426 @@ test('two rows carrying one imported_id are written once', () => {
     assert.equal(r.alreadyPresent, 1, 'the duplicate is counted, not silently dropped');
     assert.equal(api.calls.flat().length, 1);
   });
+});
+
+// --- internal transfers -------------------------------------------------------------------
+
+// 'no-inbound-alert:0000' is the licence for the payee path: ACCT_B's bank was measured to
+// send no inbound alert, so a row naming it cannot be contradicted by a row from that bank.
+// Its VALUE is the same account id '0000' maps to, because the dedupe prefetch iterates
+// Object.values(mapping) and a marker value would be handed to getTransactions as an account.
+const XFER_MAPPING = { uob: 'ACCT_B', main: 'ACCT_A', card: 'ACCT_A', '0000': 'ACCT_B',
+  'no-inbound-alert:0000': 'ACCT_B' };
+// The same accounts with no licence recorded. A payee naming '0000' here is an ordinary payee.
+const UNLICENSED = { uob: 'ACCT_B', main: 'ACCT_A', card: 'ACCT_A', '0000': 'ACCT_B' };
+const xferPayee = (accountId) => `payee-of-${accountId}`;
+
+const xrow = (over) => ({
+  source: 'trust', account: 'main', date: '2026-08-27T13:11:00+08:00',
+  amount: '-700.00', currency: 'SGD', payee: 'somebody', type: 'transfer_out',
+  raw_ref: '<x>', ...over, id: 'x' + (over.id ?? '1'),
+});
+
+function sink() {
+  const written = new Map();
+  return {
+    written,
+    // The bounds are HONOURED, not ignored. A sink that returns everything regardless of the
+    // range means no test exercises the read window at all, and every assertion here would pass
+    // just as well if the range were per-account, reversed or undefined — which is exactly how
+    // a pair straddling midnight SGT got to read the wrong days.
+    getTransactions: async (accountId, start, end) =>
+      (written.get(accountId) ?? []).filter((t) => t.date >= start && t.date <= end),
+    addTransactions: async (accountId, txns) => {
+      written.set(accountId, [...(written.get(accountId) ?? []), ...txns]);
+    },
+  };
+}
+
+test('a paired debit and credit write ONE transaction, with a transfer payee', async () => {
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00', raw_ref: '<u>' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00', raw_ref: '<t>' })],
+    XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+
+  assert.equal(r.transfers, 1);
+  assert.equal(r.imported, 1, 'only the outflow leg is written; Actual creates the mirror');
+  const txn = api.written.get('ACCT_B')[0];
+  assert.equal(txn.payee, 'payee-of-ACCT_A');
+  assert.equal(txn.payee_name, undefined, 'a transfer must not carry a payee_name');
+  assert.equal(txn.amount, -70000);
+  // Both row ids, so the suppressed leg can never re-import as a standalone duplicate.
+  assert.equal(txn.imported_id, 'xout+xin');
+});
+
+test('a transfer already written is not written again', async () => {
+  const api = sink();
+  const rows = [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+                xrow({ id: 'in', account: 'main', amount: '700.00' })];
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+  await loadRows(rows, XFER_MAPPING, api, () => null, opts);
+  const second = await loadRows(rows, XFER_MAPPING, api, () => null, opts);
+  assert.equal(second.imported, 0);
+  assert.equal(second.alreadyPresent, 1);
+});
+
+test('one leg arriving alone later dedupes against the joined id', async () => {
+  const api = sink();
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+  await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  // The outflow leg alone, in a later run. Its id is a PART of the stored joined id.
+  const again = await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  assert.equal(again.imported, 0);
+});
+
+test('legs imported separately are reported, not written a third time', async () => {
+  const api = sink();
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+  // Two runs, one leg each, so neither pairs and both land as ordinary transactions.
+  await loadRows([xrow({ id: 'out', account: 'uob', amount: '-700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  await loadRows([xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  // Now a sweep sees both. The pair forms, and must NOT be written on top of them.
+  const sweep = await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  assert.equal(sweep.imported, 0);
+  assert.equal(sweep.transfersAlreadySeparate, 1);
+});
+
+test('a payee naming a mapped account books a transfer with no partner row', async () => {
+  // Trust to UOB. Verified 2026-08-27: UOB sends no inbound alert, so there is no second leg
+  // and pairing alone would leave the far side of this transfer permanently unbooked.
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'solo', account: 'main', amount: '-1.37', payee: 'A/C ending 0000' })],
+    XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.transfers, 1);
+  assert.equal(r.imported, 1);
+  const txn = api.written.get('ACCT_A')[0];
+  assert.equal(txn.payee, 'payee-of-ACCT_B');
+  assert.equal(txn.imported_id, 'xsolo', 'no partner, so no joined id');
+});
+
+test('a payee naming the row own account is NOT a transfer', async () => {
+  // A note to self, not a movement between accounts. Both sides resolve to ACCT_A here, which
+  // is why the mapping overrides '0000' rather than introducing a second digit group: the
+  // global constraint allows only all-zero digits in a committed file.
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'self', account: 'main', amount: '-1.37', payee: 'A/C ending 0000' })],
+    { ...XFER_MAPPING, '0000': 'ACCT_A' }, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.transfers, 0);
+  assert.equal(api.written.get('ACCT_A')[0].payee_name, 'A/C ending 0000');
+});
+
+test('every transfer is reported to the caller so the run log records it', async () => {
+  const api = sink();
+  const seen = [];
+  await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee,
+      onTransfer: (t) => seen.push(t) });
+  assert.equal(seen.length, 1);
+  assert.deepEqual(seen[0], { date: '2026-08-27', amount: -70000, from: 'ACCT_B', to: 'ACCT_A' });
+});
+
+test('with no transferPayeeFor, nothing is treated as a transfer', async () => {
+  // A caller that cannot resolve transfer payees must degrade to ordinary transactions
+  // rather than throw.
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null, { reconciledThrough: '2026-07-26' });
+  assert.equal(r.transfers, 0);
+  assert.equal(r.imported, 2);
+});
+
+test('a leg below the reconciliation floor cannot pair', async () => {
+  // Pairing runs on the post-floor set, so a floor that drops one leg must not leave the
+  // other booked as half a transfer.
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'old', account: 'uob', amount: '-700.00', date: '2026-07-20T13:11:00+08:00' }),
+     xrow({ id: 'new', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.skipped, 1);
+  assert.equal(r.transfers, 0);
+  assert.equal(r.imported, 1);
+});
+
+test('a healthy re-run of a booked transfer is not reported as a split pair', async () => {
+  // transfersAlreadySeparate means at least one leg of this movement is already in the budget,
+  // so the pair was left unlinked — a thing a human has to go and look at. A re-run of a transfer we booked ourselves is not
+  // that, and reporting it would cry wolf on money on every single run. Pinned because the
+  // dedupe set holds the joined id only as its PARTS unless the whole id is added too, and
+  // with only the parts every re-run of every healthy transfer counted here.
+  const api = sink();
+  const rows = [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+                xrow({ id: 'in', account: 'main', amount: '700.00' })];
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+  await loadRows(rows, XFER_MAPPING, api, () => null, opts);
+  const second = await loadRows(rows, XFER_MAPPING, api, () => null, opts);
+  assert.equal(second.transfersAlreadySeparate, 0);
+  assert.equal(second.alreadyPresent, 1, 'still counted as already present, just not as split');
+});
+
+test('the credit leg arriving alone after the pair cannot re-import', async () => {
+  // The joined id sits on the WRITTEN leg, in the debit account. The suppressed credit leg
+  // belongs to the other account, where Actual's mirror carries no imported_id at all, so a
+  // dedupe reading only that account found nothing and wrote the money a second time.
+  const api = sink();
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+  await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  const again = await loadRows(
+    [xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  assert.equal(again.imported, 0);
+  assert.equal((api.written.get('ACCT_A') ?? []).length, 0,
+    'the credit side is Actual\'s mirror leg to create, never ours to write');
+});
+
+test('a leg already in the budget blocks the transfer, but the OTHER leg is still written', async () => {
+  // Run one: only the credit source was up, so that leg imported as an ordinary transaction
+  // into its own account. SOURCE FAILED in runs/run.log makes this the ordinary shape of a
+  // single-source outage, not an exotic replay. Run two sees both legs and pairs them, and the
+  // written leg goes to the DEBIT account, which has never held either id.
+  //
+  // Refusing the pair used to drop that debit with it, so the debit account came out short by
+  // the whole amount, reported only as a count whose name says both legs are present.
+  const api = sink();
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+  await loadRows([xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  const paired = await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null, opts);
+  assert.equal(paired.imported, 1, 'the debit leg is new, and is written as an ordinary row');
+  assert.equal(paired.transfers, 0, 'not as a transfer — that would mirror a second credit');
+  assert.equal(paired.transfersAlreadySeparate, 1);
+  assert.equal(api.written.get('ACCT_B')[0].imported_id, 'xout', 'its own id, not a joined one');
+  assert.equal(api.written.get('ACCT_A').length, 1, 'and the credit side gains nothing');
+});
+
+test('a legacy id is matched per account, never run-wide', async () => {
+  // The case the run-wide union must NOT swallow. A legacy id hashes source and raw_ref with
+  // no account, so two rows can share one: a Wise balance conversion appears in both balance
+  // statements under a single referenceNumber. Where those balances map to different Actual
+  // accounts, a run-wide legacy match would drop the second leg as already present — the exact
+  // silent loss recorded above legacyIds in load.js.
+  const api = sink();
+  const shared = rowId('trust', '<shared>');
+  // ACCT_A already holds one of them, under its pre-account id.
+  api.written.set('ACCT_A', [{ imported_id: shared, amount: -137, date: '2026-08-27' }]);
+  const r = await loadRows(
+    [xrow({ id: 'a', account: 'main', amount: '-1.37', raw_ref: '<shared>' }),
+     xrow({ id: 'b', account: 'uob', amount: '-1.37', raw_ref: '<shared>' })],
+    XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.alreadyPresent, 1, 'the ACCT_A row is the one already in the budget');
+  assert.equal(r.imported, 1, 'the ACCT_B row shares only the legacy id, and is a different row');
+  assert.equal(api.written.get('ACCT_B').length, 1);
+});
+
+test('a pair straddling midnight SGT reads BOTH days, so the earlier leg is still found', async () => {
+  // The read window came off the written transactions, which by construction exclude the
+  // suppressed leg. Two legs thirty seconds apart can still fall on different Singapore days,
+  // and then the window covered only the written leg's day: right accounts, wrong dates, and
+  // the duplicate this dedupe exists to stop came straight back.
+  const api = sink();
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+  const credit = xrow({ id: 'in', account: 'main', amount: '700.00',
+    date: '2026-08-27T23:59:45+08:00' });
+  const debit = xrow({ id: 'out', account: 'uob', amount: '-700.00',
+    date: '2026-08-28T00:00:15+08:00' });
+  // Run one: only the credit source was up, so it books standalone, dated the 27th.
+  await loadRows([credit], XFER_MAPPING, api, () => null, opts);
+  assert.equal(api.written.get('ACCT_A')[0].date, '2026-08-27');
+  // Run two: both legs pair, and the written leg is the debit, dated the 28th.
+  const paired = await loadRows([debit, credit], XFER_MAPPING, api, () => null, opts);
+  // The credit is found a day earlier, so this is not a pair: the debit writes as an ordinary
+  // row and the transfer is reported unlinked. Read the 28th alone and the credit is invisible,
+  // which shows up here as transfersAlreadySeparate 0 and a joined imported_id.
+  assert.equal(paired.transfersAlreadySeparate, 1, 'the credit leg was found, on the 27th');
+  assert.equal(paired.imported, 1, 'the debit leg is new');
+  assert.equal(api.written.get('ACCT_B')[0].imported_id, 'xout', 'an ordinary row, not a transfer');
+  assert.equal(api.written.get('ACCT_A').length, 1, 'the credit side is untouched');
+});
+
+test('a transfer is counted and reported when it is WRITTEN, not when it is detected', async () => {
+  // Detection happens in the row loop, the write happens after the dedupe. Counting at
+  // detection made every re-run report a transfer on a run that wrote nothing — a repeated
+  // alarm about money, which teaches the reader to stop reading the run line.
+  const api = sink();
+  const seen = [];
+  const rows = [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+                xrow({ id: 'in', account: 'main', amount: '700.00' })];
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee,
+    onTransfer: (t) => seen.push(t) };
+  const first = await loadRows(rows, XFER_MAPPING, api, () => null, opts);
+  assert.equal(first.transfers, 1);
+  assert.equal(seen.length, 1);
+  const second = await loadRows(rows, XFER_MAPPING, api, () => null, opts);
+  assert.equal(second.transfers, 0, 'nothing was written, so no transfer was made');
+  assert.equal(second.alreadyPresent, 1, 'it is still counted as already present');
+  assert.equal(seen.length, 1, 'and the run log is not told about it a second time');
+});
+
+test('a payee naming an account with no recorded licence is an ordinary payee', async () => {
+  // Inventing the far leg from a payee string is only safe where the receiving bank cannot
+  // send a row of its own. Without that measurement recorded, the payee is just a payee.
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'solo', account: 'main', amount: '-1.37', payee: 'A/C ending 0000' })],
+    UNLICENSED, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.transfers, 0);
+  assert.equal(api.written.get('ACCT_A')[0].payee_name, 'A/C ending 0000');
+  assert.equal(api.written.get('ACCT_B'), undefined, 'no leg is invented in the target account');
+});
+
+test('an unlicensed payee target does not double when the real counter-leg arrives', async () => {
+  // The reproduction. The debit names the target, and the target's own bank DID send a row —
+  // nine minutes later, so pairing refuses it and the payee path would have invented a second
+  // leg beside it. Two ordinary transactions, and ACCT_B holds the money once.
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'out', account: 'main', amount: '-1.37', payee: 'A/C ending 0000' }),
+     xrow({ id: 'in', account: 'uob', amount: '1.37', date: '2026-08-27T13:20:00+08:00' })],
+    UNLICENSED, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.imported, 2);
+  assert.equal(r.transfers, 0);
+  assert.equal(r.ambiguous, 0, 'pairing refused it silently — nine minutes is outside the window');
+  assert.equal(api.written.get('ACCT_B').length, 1, 'the counter-leg, once');
+  assert.equal(api.written.get('ACCT_B')[0].amount, 137);
+});
+
+test('a pair whose partner is already in the budget still writes the leg that is not', async () => {
+  // The live dry run, in isolation. The monthly UOB-to-Trust transfer: the Trust credit has been
+  // in the budget for months, the UOB debit is brand new because UOB was only mapped today. The
+  // pair is refused — correctly, since linking would mean editing a transaction already there —
+  // but the debit is money that has never been booked and must still land.
+  const api = sink();
+  api.written.set('ACCT_A', [{ imported_id: 'xin', amount: 70000, date: '2026-08-27' }]);
+  const r = await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00' })],
+    XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.imported, 1, 'the UOB debit is new money and is written');
+  assert.equal(r.transfers, 0);
+  assert.equal(r.transfersAlreadySeparate, 1, 'reported as a transfer left unlinked');
+  assert.equal(r.alreadyPresent, 1, 'the Trust credit was already there');
+  assert.equal(api.written.get('ACCT_B').length, 1);
+  assert.equal(api.written.get('ACCT_B')[0].amount, -70000);
+  assert.equal(api.written.get('ACCT_A').length, 1, 'nothing added to the side that had it');
+});
+
+test('neither leg of a refused pair may invent a transfer from its payee', async () => {
+  // Refusing a pair drops both rows out of pairedOut, so each falls through to the payee path.
+  // A payee naming a licensed account then books an invented leg into the very account whose
+  // real row is in this same batch — one movement reported as both a transfer and a transfer
+  // left unlinked, with the target account holding it twice once Actual mirrors.
+  const opts = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+
+  // The debit names the target. Seed the credit so the pair is refused for budget state.
+  const a = sink();
+  a.written.set('ACCT_B', [{ imported_id: 'xin', amount: 70000, date: '2026-08-27' }]);
+  const out = await loadRows(
+    [xrow({ id: 'out', account: 'main', amount: '-700.00', payee: 'A/C ending 0000' }),
+     xrow({ id: 'in', account: 'uob', amount: '700.00' })],
+    XFER_MAPPING, a, () => null, opts);
+  assert.equal(out.transfers, 0, 'the pairing row is the licence being contradicted');
+  assert.equal(out.transfersAlreadySeparate, 1);
+  assert.equal(a.written.get('ACCT_A')[0].payee_name, 'A/C ending 0000');
+  assert.equal(a.written.get('ACCT_B').length, 1, 'the target gains nothing');
+
+  // The same exposure in the other direction: the CREDIT leg carries the naming payee.
+  const b = sink();
+  b.written.set('ACCT_B', [{ imported_id: 'xout', amount: -70000, date: '2026-08-27' }]);
+  const into = await loadRows(
+    [xrow({ id: 'out', account: 'uob', amount: '-700.00' }),
+     xrow({ id: 'in', account: 'main', amount: '700.00', payee: 'A/C ending 0000' })],
+    XFER_MAPPING, b, () => null, opts);
+  assert.equal(into.transfers, 0);
+  assert.equal(into.transfersAlreadySeparate, 1);
+  assert.equal(b.written.get('ACCT_A')[0].payee_name, 'A/C ending 0000');
+  assert.equal(b.written.get('ACCT_B').length, 1);
+});
+
+test('a contested row may not invent a transfer leg from its payee', async () => {
+  // Two candidates is more evidence of a counterpart than one, not less. The row satisfies every
+  // pairing rule and is refused only for ambiguity, so it never became a pair — and it used to
+  // fall through to the licence and book an invented leg into the very account both candidates
+  // came from, while they imported beside it.
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'solo', account: 'main', amount: '-700.00', payee: 'A/C ending 0000' }),
+     xrow({ id: 'c1', account: 'uob', amount: '700.00' }),
+     xrow({ id: 'c2', account: 'uob', amount: '700.00' })],
+    XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.transfers, 0, 'contested, so the licence does not apply');
+  assert.equal(r.ambiguous, 3);
+  assert.equal(api.written.get('ACCT_A')[0].payee_name, 'A/C ending 0000');
+  assert.equal(api.written.get('ACCT_A')[0].payee, undefined, 'no invented far leg');
+  assert.equal(api.written.get('ACCT_B').length, 2, 'both candidates import as ordinary rows');
+});
+
+test('a licensed row with no candidate at all still books its transfer', async () => {
+  // The over-tightening check. Trust-to-UOB is the case the licence exists for: one row, no
+  // counterpart anywhere, and the far side is only bookable from the payee.
+  const api = sink();
+  const r = await loadRows(
+    [xrow({ id: 'solo', account: 'main', amount: '-1.37', payee: 'A/C ending 0000' }),
+     xrow({ id: 'other', account: 'card', amount: '-9.99', payee: 'TEST MERCHANT SG' })],
+    XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee });
+  assert.equal(r.transfers, 1);
+  assert.equal(r.ambiguous, 0);
+  assert.equal(api.written.get('ACCT_A').find((t) => t.imported_id === 'xsolo').payee,
+    'payee-of-ACCT_B');
+});
+
+test('a counter-leg below the reconciliation floor still bars the payee path', async () => {
+  // pairRows runs on the post-floor rows, so a counter-leg on or below the floor leaves the
+  // surviving leg with no partner and uncontested — straight into the payee path, inventing a
+  // leg beside money already booked. Re-piping an archive from runs/ after the floor has moved
+  // past part of it splits a pair across the floor exactly this way.
+  const api = sink();
+  const debit = xrow({ id: 'out', account: 'uob', amount: '-700.00',
+    date: '2026-08-20T23:59:00+08:00' });
+  const credit = xrow({ id: 'in', account: 'main', amount: '700.00',
+    date: '2026-08-21T00:00:00+08:00', payee: 'A/C ending 0000' });
+  // The debit imported on an earlier run, under an earlier floor.
+  await loadRows([debit], XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-08-19', transferPayeeFor: xferPayee });
+  assert.equal(api.written.get('ACCT_B').length, 1);
+  // Now the floor has moved past it, and the archive is re-piped with both legs.
+  const r = await loadRows([debit, credit], XFER_MAPPING, api, () => null,
+    { reconciledThrough: '2026-08-20', transferPayeeFor: xferPayee });
+  assert.equal(r.skipped, 1, 'the debit is below the floor and is not written again');
+  assert.equal(r.transfers, 0, 'but it is still evidence, so the licence stands down');
+  assert.equal(api.written.get('ACCT_A')[0].payee_name, 'A/C ending 0000');
+  assert.equal(api.written.get('ACCT_B').length, 1, 'no second debit is mirrored in');
 });
