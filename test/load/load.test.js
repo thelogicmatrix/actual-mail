@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { toActualTxn, loadRows, sgDay, inScope, fxDatesFor } from '../../src/load/load.js';
+import { toActualTxn, loadRows, sgDay, inScope, fxDatesFor, splitUntracked } from '../../src/load/load.js';
 import { makeRateLookup, DEFAULT_MARKUP } from '../../src/load/fx.js';
 import { rowId, toMinorUnits } from '../../src/row.js';
 
@@ -943,4 +943,50 @@ test('a counter-leg below the reconciliation floor still bars the payee path', a
   assert.equal(r.transfers, 0, 'but it is still evidence, so the licence stands down');
   assert.equal(api.written.get('ACCT_A')[0].payee_name, 'A/C ending 0000');
   assert.equal(api.written.get('ACCT_B').length, 1, 'no second debit is mirrored in');
+});
+
+// --- untracked source accounts ---
+
+// The live failure this section exists for: Wise holds balances in several currencies but the
+// budget carries ONE Wise account, denominated in SGD. A wise-aud row therefore resolved to the
+// SGD account and was FX-converted into it, inventing an SGD debit for money that never moved in
+// SGD. Two of those were deleted by hand from the live budget on 2026-08-28. The mapping key is
+// what makes them resolvable, so the licence has to beat the key rather than replace it.
+const AUD_ROW = { ...ROW, id: 'aud1', source: 'wise', account: 'wise-aud',
+                  amount: '-42.00', currency: 'AUD', payee: 'TEST MERCHANT AU' };
+const TRACKED_MAPPING = { 'wise-sgd': 'uuid-wise', 'wise-aud': 'uuid-wise' };
+const UNTRACKED_MAPPING = { ...TRACKED_MAPPING, 'untracked:wise-aud': null };
+
+test('a row from an untracked source account is never written', async () => {
+  const api = fakeApi();
+  await loadRows([AUD_ROW], UNTRACKED_MAPPING, api, () => FX);
+  assert.equal(api.calls.length, 0, 'an untracked row must reach no account at all');
+});
+
+test('an untracked row is counted, not silently dropped', async () => {
+  const result = await loadRows([AUD_ROW], UNTRACKED_MAPPING, fakeApi(), () => FX);
+  assert.equal(result.untracked, 1);
+  assert.equal(result.imported, 0);
+  assert.equal(result.converted, 0, 'an untracked row must not take the FX path');
+});
+
+test('an untracked licence suppresses only its own account key', async () => {
+  const api = fakeApi();
+  const sgdRow = { ...ROW, id: 'sgd1', source: 'wise', account: 'wise-sgd' };
+  const result = await loadRows([sgdRow, AUD_ROW], UNTRACKED_MAPPING, api, () => FX);
+  assert.equal(result.imported, 1);
+  assert.equal(result.untracked, 1);
+  assert.deepEqual(api.calls.map((c) => c[0]), ['uuid-wise']);
+  assert.deepEqual(api.calls[0][1].map((t) => t.imported_id), ['sgd1']);
+});
+
+test('splitUntracked partitions rows so the FX date list never carries an untracked date', () => {
+  const sgdRow = { ...ROW, id: 'sgd1', source: 'wise', account: 'wise-sgd' };
+  const { tracked, untracked } = splitUntracked([sgdRow, AUD_ROW], UNTRACKED_MAPPING);
+  assert.deepEqual(tracked.map((r) => r.id), ['sgd1']);
+  assert.deepEqual(untracked.map((r) => r.id), ['aud1']);
+  // The point of partitioning before fxDatesFor: a rate service outage must not fail a run
+  // whose only foreign rows are ones we have decided not to import.
+  assert.deepEqual(fxDatesFor(tracked), []);
+  assert.deepEqual(fxDatesFor([sgdRow, AUD_ROW]), ['2026-07-28']);
 });

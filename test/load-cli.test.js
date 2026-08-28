@@ -42,6 +42,17 @@ writeFileSync(MAPPING_EMPTY, JSON.stringify({
 // A `no-inbound-alert:` licence whose bare account key is absent. loadRows resolves a
 // payee-named account through the ordinary key first, so this licence can never fire: the entry
 // looks live in the file and silently does nothing.
+// An `untracked:` source account WITHOUT an ordinary key for it. That is the shape the
+// completeness check has to learn: the row's account is genuinely absent from the mapping, and
+// before this it exited 1 naming a key the operator deliberately did not write.
+const MAPPING_UNTRACKED = join(TMP, 'mapping-untracked.json');
+writeFileSync(MAPPING_UNTRACKED, JSON.stringify({
+  '0000': '00000000-0000-0000-0000-00000000000a',
+  card: '00000000-0000-0000-0000-00000000000b',
+  'no-inbound-alert:0000': '00000000-0000-0000-0000-00000000000a',
+  'untracked:wise-aud': null,
+}));
+
 const MAPPING_ORPHAN_LICENCE = join(TMP, 'mapping-orphan-licence.json');
 writeFileSync(MAPPING_ORPHAN_LICENCE, JSON.stringify({
   card: '00000000-0000-0000-0000-00000000000b',
@@ -344,12 +355,12 @@ test('a real import that syncs cleanly reports its counts and exits 0', () => {
 
 // --- the example mapping ------------------------------------------------------------------
 
-test('mapping.example.json shows all five key shapes the README describes', () => {
+test('mapping.example.json shows all six key shapes the README describes', () => {
   // The four-digit account key is the least guessable of them and a hard error on a user's first
   // PayNow transfer, and it was the one the example left out. The count is asserted too: without
   // it, deleting a line from the example failed nothing, which is how a shape goes missing again.
   const keys = Object.keys(JSON.parse(readFileSync(new URL('../mapping.example.json', import.meta.url))));
-  assert.equal(keys.length, 6, 'five shapes, and the named shape appears twice');
+  assert.equal(keys.length, 7, 'six shapes, and the named shape appears twice');
   assert.ok(keys.includes('card'), 'a card key');
   assert.ok(keys.includes('main'), 'a main-account key');
   assert.ok(keys.some((k) => /^\d{4}$/.test(k)), 'a four-digit account key');
@@ -358,4 +369,42 @@ test('mapping.example.json shows all five key shapes the README describes', () =
   // The licence key, and it has to be four-digit: the loader now warns about any other shape,
   // because a payee names an account by digits and never by a name.
   assert.ok(keys.some((k) => /^no-inbound-alert:\d{4}$/.test(k)), 'a no-inbound-alert licence key');
+  // The untracked key carries null, not an id, and the example is the only place that shape is
+  // written down. A UUID here would read as "point it at an account", which is the thing it
+  // exists to avoid.
+  const untracked = keys.filter((k) => k.startsWith('untracked:'));
+  assert.equal(untracked.length, 1, 'an untracked source-account key');
+  const example = JSON.parse(readFileSync(new URL('../mapping.example.json', import.meta.url)));
+  assert.equal(example[untracked[0]], null, 'an untracked key names no account');
+});
+
+// --- untracked source accounts ----------------------------------------------------------
+//
+// Wise holds a balance per currency; the budget carries one SGD Wise account. A wise-aud row
+// mapped into it was FX-converted and booked as an SGD debit that never happened. The licence
+// has to survive the mapping-completeness gate, which runs before loadRows ever sees the row.
+
+const AUD_ROW = { ...ROW, id: 'aud-1', source: 'wise', account: 'wise-aud',
+                  amount: '-42.00', currency: 'AUD', payee: 'TEST MERCHANT AU' };
+
+test('an untracked account is not reported as a missing mapping key', () => {
+  const r = run([ROW, AUD_ROW],
+    { ACTUAL_MAIL_MAPPING: MAPPING_UNTRACKED }, { stub: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(!/missing \d+ key/.test(r.stderr), 'a deliberately untracked account is not missing');
+});
+
+test('the run reports how many rows were set aside as untracked', () => {
+  const r = run([ROW, AUD_ROW],
+    { ACTUAL_MAIL_MAPPING: MAPPING_UNTRACKED }, { stub: true });
+  assert.equal(r.status, 0, r.stderr);
+  // The summary line is stderr, which is what run.sh ships into the Discord webhook body. A
+  // count carries no account key, so it is safe there where the key itself would not be.
+  assert.match(r.stderr, /1 untracked/);
+  // The whole point: it is set aside, not converted. An FX-estimated count here would mean the
+  // AUD row went through the rate path into the SGD account, which is the defect.
+  assert.ok(!/FX-estimated/.test(r.stderr), 'an untracked row must not be FX-estimated');
+  // And the row itself never reaches a budget line.
+  assert.ok(!r.stdout.includes('aud-1'), 'an untracked row must not be written');
+  assert.equal(r.stdout.match(/^DRY /gm).length, 1);
 });

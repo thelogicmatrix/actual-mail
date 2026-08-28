@@ -256,14 +256,15 @@ check. It lists every missing key at once.
   "0000": "<actual account id>",
   "wise-sgd": "<actual account id>",
   "pot:Buffer": "<actual account id>",
-  "no-inbound-alert:0000": "<actual account id>"
+  "no-inbound-alert:0000": "<actual account id>",
+  "untracked:wise-aud": null
 }
 ```
 
-Five shapes appear there, and `mapping.example.json` shows all of them: a named account a
+Six shapes appear there, and `mapping.example.json` shows all of them: a named account a
 parser chose (`card`, `main`), the last four digits of an account the alert email quoted, a
 Wise currency balance (`wise-<currency>` in lower case), `pot:<Pot Name>` for a savings pot,
-and `no-inbound-alert:<key>` described below.
+and `no-inbound-alert:<key>` and `untracked:<key>`, both described below.
 
 `no-inbound-alert:<key>` records one measurement: **that bank sends you no alert when money
 arrives.** Its value is the same account id `<key>` itself maps to.
@@ -311,6 +312,30 @@ named key like `main`, is unreachable — the payee is resolved through the ordi
 first — so the licence does nothing and transfers into that account quietly go back to being
 ordinary spends. The loader warns when it finds one, counting them on stderr and naming them on
 stdout, and imports anyway: an inert licence loses a link, not money.
+
+### Source accounts you do not track
+
+`untracked:<key>` says the opposite of every other entry: **this source account is not in the
+budget at all.** Its value is `null`, because there is no account to name.
+
+Wise is why it exists. Wise holds a separate balance per currency and the parser emits one key
+per balance — `wise-sgd`, `wise-aud`, `wise-usd` — but a budget usually carries a single Wise
+account, denominated in one currency. Point `wise-aud` at that SGD account and an AUD movement
+is converted at the day's rate and written as an SGD debit that never happened. Two of those had
+to be deleted by hand before this existed.
+
+Leaving the key out instead is not the same thing. An unmapped account is a hard error, on
+purpose, so one AUD movement would fail the whole run rather than one row. `untracked:` is the
+way to say *deliberately absent* rather than *forgotten*.
+
+Rows from an untracked account are set aside before anything else looks at them: before the
+reconciliation floor, before transfer pairing, and before any FX rate is fetched. They are
+counted on the run line as `N untracked`, never silently dropped — a mistyped key shows up as
+rows going missing rather than as silence. A rate outage cannot fail a run whose only foreign
+rows are untracked ones.
+
+The licence beats an ordinary key rather than replacing it, so a `wise-aud` entry left over from
+before is inert rather than contradictory. Removing it is tidier, and changes nothing.
 
 Pot moves are written as **two-sided transfers** rather than spends. The row's payee becomes
 the target account's transfer payee, so the money leaves one account and arrives in the other

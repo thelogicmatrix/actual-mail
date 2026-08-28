@@ -40,6 +40,33 @@ export function inScope(rows, reconciledThrough = null) {
 // orphan licences stayed silent, which is the failure the warning exists to catch.
 export const NO_INBOUND_ALERT = 'no-inbound-alert:';
 
+// The mapping key prefix that says: this source account is deliberately OUTSIDE the budget.
+// Same convention as `pot:` and `no-inbound-alert:`, and the value is null because there is no
+// Actual account to name — which also keeps the key out of the `Object.values(mapping)` scan
+// that fetches each account's existing transactions.
+//
+// This exists because Wise holds a balance per currency but the budget carries ONE Wise account,
+// denominated in the base currency. Without it a `wise-aud` row resolves to that SGD account and
+// takes the FX path, inventing an SGD debit for money that never moved in SGD. Removing the
+// mapping key instead is not the same fix: the loader hard-errors on an unmapped account, so a
+// single foreign movement would fail the whole run rather than one row.
+//
+// The licence BEATS a real key rather than replacing it, so a key left in place from before is
+// inert rather than contradictory.
+export const UNTRACKED = 'untracked:';
+
+// ponytail: a partition, not a filter plus a count. The caller needs both halves — the rows to
+// keep and how many were set aside — and returning one and recomputing the other is how a
+// dropped row stops being counted.
+export function splitUntracked(rows, mapping) {
+  const keys = new Set(Object.keys(mapping)
+    .filter((k) => k.startsWith(UNTRACKED)).map((k) => k.slice(UNTRACKED.length)));
+  const tracked = [];
+  const untracked = [];
+  for (const row of rows) (keys.has(row.account) ? untracked : tracked).push(row);
+  return { tracked, untracked };
+}
+
 export function fxDatesFor(rows, base = baseCurrency()) {
   return rows.filter((r) => r.currency !== base).map((r) => sgDay(r.date));
 }
@@ -119,8 +146,14 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   // settled. Importing it would be backfill into an already-balanced account. inScope compares
   // the same Singapore day the row is written with: a UTC-derived day would drift a Wise row
   // across the floor and drop it permanently, counted only as `skipped`, which nothing surfaces.
-  const scoped = inScope(rows, reconciledThrough);
-  const skipped = rows.length - scoped.length;
+  // Untracked rows come out BEFORE the floor, before pairing and before the FX path, because
+  // every one of those would otherwise treat the row as money in this budget: pairing could
+  // match it as a transfer leg, and the mapped-but-untracked account would take it at the
+  // rate lookup. Counted separately from `skipped`, which means "already reconciled" and is a
+  // different fact about a different row.
+  const { tracked, untracked } = splitUntracked(rows, mapping);
+  const scoped = inScope(tracked, reconciledThrough);
+  const skipped = tracked.length - scoped.length;
 
   // A caller that cannot resolve transfer payees degrades to ordinary transactions rather
   // than throwing. bin/actual-mail-load.js always supplies one.
@@ -418,5 +451,6 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
     }
     throw e;
   }
-  return { imported, converted, skipped, alreadyPresent, transfers, transfersAlreadySeparate, ambiguous };
+  return { imported, converted, skipped, alreadyPresent, untracked: untracked.length,
+           transfers, transfersAlreadySeparate, ambiguous };
 }

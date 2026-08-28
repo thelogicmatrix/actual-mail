@@ -2,7 +2,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as api from '@actual-app/api';
-import { loadRows, sgDay, inScope, fxDatesFor, NO_INBOUND_ALERT } from '../src/load/load.js';
+import { loadRows, sgDay, inScope, fxDatesFor, splitUntracked, NO_INBOUND_ALERT } from '../src/load/load.js';
 import { fetchRates, makeRateLookup, DEFAULT_MARKUP } from '../src/load/fx.js';
 
 const USAGE = `actual-mail-load - normalised transaction rows on stdin -> Actual Budget
@@ -180,7 +180,11 @@ if (orphanLicences.length) {
 // Completeness check on the mapping, over the rows that will actually be written. Reporting
 // every missing key at once beats discovering them one hard error at a time. inScope() lives in
 // load.js so it cannot disagree with loadRows about which rows are in scope.
-const willImport = inScope(rows, reconciledThrough);
+// splitUntracked first, so an account the operator deliberately kept out of the budget is not
+// reported as a missing key and does not put its date on the FX list. Both checks below ask
+// "what will actually be written", and an untracked row will not be — loadRows partitions the
+// same way, from the same mapping, so the two cannot disagree about which rows those are.
+const willImport = inScope(splitUntracked(rows, mapping).tracked, reconciledThrough);
 // A pot transfer needs BOTH keys — the account it leaves and the pot it lands in — and
 // loadRows throws on either. Substituting one for the other meant pot rows fell out of the
 // "report every missing key at once" promise and failed one hard error at a time instead.
@@ -266,13 +270,18 @@ try {
   const onTransfer = ({ date, amount, from, to }) =>
     local(`TRANSFER ${date} ${String(amount).padStart(9)}  ${from} -> ${to}`);
 
-  const { imported, converted, skipped, alreadyPresent,
+  const { imported, converted, skipped, alreadyPresent, untracked,
           transfers, transfersAlreadySeparate, ambiguous } = await loadRows(
     rows, mapping, dryRun ? sink : api, rateLookup,
     { reconciledThrough, transferPayeeFor, onTransfer });
 
   const tail = `${converted ? `, ${converted} FX-estimated` : ''}`
     + `${skipped ? `, ${skipped} skipped as reconciled` : ''}`
+    // Set aside because their source account is outside the budget, NOT converted into it.
+    // Counted rather than merely absent: a row that vanishes with nothing said is the quiet
+    // loss this loader exists to prevent, and the count is what makes a mis-typed
+    // `untracked:` key visible as rows going missing instead of as silence.
+    + `${untracked ? `, ${untracked} untracked` : ''}`
     + `${alreadyPresent ? `, ${alreadyPresent} already present` : ''}`
     + `${transfers ? `, ${transfers} transfer(s)` : ''}`
     // At least one leg was already in the budget — an ordinary transaction, a transfer leg
