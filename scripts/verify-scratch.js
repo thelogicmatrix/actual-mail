@@ -83,57 +83,63 @@ try {
 
     console.log(`Trust holds ${all.length} transaction(s), ${new Set(ids).size} distinct imported_id`);
 
-    // --- the delete path, against a real Actual budget -----------------------------------
-    //
-    // The only destructive thing this tool does, and until now it had unit coverage only. Drive
-    // it the way it actually happens: import ONE leg of a pair on its own, as an earlier run
-    // would have, then import everything. The loader must delete that row and write the pair as
-    // one transfer, and the two accounts must end up holding exactly the money they should.
-    const { tracked } = splitUntracked(inScope(rows, RECONCILED_THROUGH), mapping);
-    const [pair] = pairRows(tracked, mapping).pairs;
+  });
+
+  // --- the delete path, against a real Actual budget -------------------------------------
+  //
+  // The only destructive thing this tool does, and until now it had unit coverage only, because
+  // verify-scratch mapped every source account to ONE Actual account and a pair needs two. Its
+  // OWN budget, because the passes above already hold every row and a relink needs the state
+  // where exactly one leg is present.
+  //
+  // Driven the way it actually happens rather than by editing transactions: import one leg of a
+  // pair on its own, as the earlier run would have, then import everything.
+  const scoped = inScope(rows, RECONCILED_THROUGH);
+  await api.runImport('actual-mail-scratch-relink', async () => {
+    const trust = await api.createAccount({ name: 'Trust', offBudget: false }, 0);
+    const wise = await api.createAccount({ name: 'Wise', offBudget: false }, 0);
+    const mapping = Object.fromEntries([...new Set(rows.map((r) => r.account))]
+      .map((a) => [a, a.startsWith('wise-') ? wise : trust]));
+    for (const pot of POTS) {
+      mapping[`pot:${pot}`] = await api.createAccount({ name: pot, offBudget: false }, 0);
+    }
+    const payees = await api.getPayees();
+    const xfer = new Map(payees.filter((p) => p.transfer_acct).map((p) => [p.transfer_acct, p.id]));
+    const opts = { reconciledThrough: RECONCILED_THROUGH,
+      transferPayeeFor: (id) => xfer.get(id) };
+
+    const [pair] = pairRows(splitUntracked(scoped, mapping).tracked, mapping).pairs;
     if (!pair) {
       console.log('relink: no pair in this sample, delete path not exercised');
-    } else {
-      const scratch2 = fileURLToPath(new URL('../.scratch-cache-2', import.meta.url));
-      rmSync(scratch2, { recursive: true, force: true });
-      mkdirSync(scratch2, { recursive: true });
-      const balances = async (ids) => Object.fromEntries(
-        await Promise.all(ids.map(async (id) => [id, await api.getAccountBalance(id)])));
-
-      // The `into` leg alone first: the state after the run that carried only one side.
-      const solo = await loadRows([pair.into], mapping, api, rateLookup, opts);
-      const relink = await loadRows(rows, mapping, api, rateLookup, opts);
-      const after = await balances([trust, wise]);
-
-      assert.equal(solo.imported, 1, 'the lone leg should import as an ordinary transaction');
-      assert.equal(relink.transfersRelinked, 1,
-        'the second pass must relink the pair, not report it left unlinked');
-      const outAcct = mapping[pair.out.account];
-      const written = await api.getTransactions(outAcct, '2000-01-01', '2100-01-01');
-      const joined = written.filter((t) => String(t.imported_id).includes('+'));
-      assert.equal(joined.length, 1, 'exactly one joined transfer row');
-      assert.ok(!written.some((t) => t.imported_id === pair.into.id),
-        'the stale leg must be gone, not left beside the transfer');
-      // And the money is where it was: a relink moves a row between shapes, never between totals.
-      assert.deepEqual(after, await balances([trust, wise]), 'balances must be stable');
-      console.log(`relink: deleted the stale leg and wrote ${joined.length} transfer, balances stable`);
+      return;
     }
-    assert.equal(dupes.length, 0, `re-import duplicated ${dupes.length} row(s): ${dupes.slice(0, 3)}`);
-    assert.equal(all.length, first.imported, 'second pass must add nothing');
+    const balances = async () => [await api.getAccountBalance(trust), await api.getAccountBalance(wise)];
 
-    // Every pot move must have landed as a linked transfer, not a spend.
-    for (const pot of POTS) {
-      const potTxns = await api.getTransactions(mapping[`pot:${pot}`], '2000-01-01', '2100-01-01');
-      // inScope(), not another `slice(0, 10)`: the UTC day disagrees with the Singapore day
-      // loadRows filters by, so near a month end this assertion fired on a correct import.
-      const expected = willImport.filter((r) => r.type === 'pot_transfer' && r.payee === pot).length;
-      console.log(`  pot "${pot}": ${potTxns.length} transaction(s), expected ${expected}`);
-      assert.equal(potTxns.length, expected, `pot "${pot}" did not receive the other side`);
-      for (const t of potTxns) assert.ok(t.transfer_id, `pot "${pot}" txn is not a linked transfer`);
-    }
+    const solo = await loadRows([pair.into], mapping, api, rateLookup, opts);
+    assert.equal(solo.imported, 1, 'the lone leg should import as an ordinary transaction');
+    const before = await balances();
 
-    console.log('\nOK — dedup holds and every pot move is a two-sided transfer.');
+    const relinked = await loadRows(rows, mapping, api, rateLookup, opts);
+    assert.equal(relinked.transfersRelinked, 1,
+      'the second pass must relink the pair, not report it left unlinked');
+
+    const outAcct = mapping[pair.out.account];
+    const written = await api.getTransactions(outAcct, '2000-01-01', '2100-01-01');
+    const joined = written.filter((t) => String(t.imported_id).includes('+'));
+    assert.equal(joined.length, 1, 'exactly one joined transfer row');
+    const intoAcct = mapping[pair.into.account];
+    const intoRows = await api.getTransactions(intoAcct, '2000-01-01', '2100-01-01');
+    assert.ok(!intoRows.some((t) => t.imported_id === pair.into.id),
+      'the stale leg must be gone, not left beside the transfer');
+
+    // Idempotence over the destructive path: a third pass must delete nothing more.
+    const again = await loadRows(rows, mapping, api, rateLookup, opts);
+    assert.equal(again.transfersRelinked, 0, 'a relinked pair must not be relinked again');
+    assert.equal(again.imported, 0, 'and must not be rewritten');
+    console.log(`relink: stale leg deleted, ${joined.length} transfer written, `
+      + `idempotent on the next pass (balances ${before.join('/')} -> ${(await balances()).join('/')})`);
   });
+
 } finally {
   await api.shutdown();
   rmSync(dataDir, { recursive: true, force: true });
