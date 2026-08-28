@@ -394,9 +394,10 @@ Two cases are refused and fall back to reporting `left unlinked`:
   unbalance it
 - the existing row is **already part of a transfer** — it is not stale
 
-Relinking needs an api that can delete. A caller supplying only `getTransactions` and
-`addTransactions`, as `scripts/verify-scratch.js` does, keeps the old reporting behaviour rather
-than failing.
+Relinking needs an api that can delete. An external caller supplying only `getTransactions` and
+`addTransactions` keeps the old reporting behaviour rather than failing. `scripts/verify-scratch.js`
+passes the whole Actual module, so it does exercise this path, against the throwaway budget it
+builds.
 
 The rule for what counts as a pair is unchanged and deliberately narrow: two minutes, same
 currency, equal and opposite, two different resolved accounts. Widening it to catch legs further
@@ -558,15 +559,21 @@ substitute for reading your own diff. It catches shapes, not everything.
    construction, and a domestic row can still settle at a different figure if a hold changes.
    Every estimated row says so in its note. Monthly reconciliation is expected, not
    exceptional.
-2. **Cross-source double counting, narrowed to one run and to unambiguous pairs.** A transfer
-   between two of your own accounts appears in both feeds. Two legs are paired and written as one
-   two-sided transfer only when they land in the **same** run, in the same currency, within two
-   minutes, non-zero and equal and opposite, resolving to **different** Actual accounts, and each
-   is the other's only candidate. Miss any of those and both rows import as ordinary
-   transactions: legs in different currencies are never paired at all, legs further apart than
-   the window are not candidates, and legs with more than one candidate between them are refused
-   as ambiguous rather than guessed at. Joining any of those up afterwards is yours to do — the
-   loader never edits a transaction already in your budget.
+2. **Cross-source double counting, narrowed to unambiguous pairs.** A transfer between two of
+   your own accounts appears in both feeds. Two legs are paired and written as one two-sided
+   transfer when they are in the same currency, within two minutes, non-zero and equal and
+   opposite, resolving to **different** Actual accounts, and each is the other's only candidate.
+   Miss any of those and both rows import as ordinary transactions: legs in different currencies
+   are never paired at all, legs further apart than the window are not candidates, and legs with
+   more than one candidate between them are refused as ambiguous rather than guessed at. Joining
+   those up afterwards is yours to do.
+
+   The legs no longer have to land in the **same** run. When one is already in your budget the
+   pair is relinked, which means **the loader deletes that row** and writes the transfer fresh.
+   That is the one place this tool removes something you may have edited, and it refuses to do it
+   to a reconciled row, a row already part of a transfer, a split parent, a row standing for two
+   source rows, or a row that exists in more than one account. See "When one leg arrived in an
+   earlier run" above.
 
    The `transfer(s) left unlinked` count is narrower than it sounds: it counts only pairs the
    loader **found** and then refused because one leg was already imported. A run that sees one

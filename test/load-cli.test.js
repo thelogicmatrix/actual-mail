@@ -573,6 +573,9 @@ test('a dry run reports the relink and deletes NOTHING', () => {
   assert.equal(r.status, 0, r.stderr);
   assert.equal(readFileSync(deletes, 'utf8'), '', 'a dry run must not delete a transaction');
   assert.match(r.stdout, /WOULD DELETE/);
+  // And NOT the past tense on the same run whose last line says "nothing written". Asserting the
+  // presence of one wording says nothing about the absence of the contradictory one.
+  assert.doesNotMatch(r.stdout, /^DELETED/m);
 });
 
 test('a real run deletes the stale leg and counts the relink', () => {

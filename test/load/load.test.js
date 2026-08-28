@@ -1120,8 +1120,8 @@ test('a leg that is already part of a transfer is left completely alone', async 
 });
 
 test('a caller whose api cannot delete keeps the old behaviour', async () => {
-  // scripts/verify-scratch.js and any external caller pass a two-method api. Relinking must
-  // degrade to reporting rather than throwing on a missing method.
+  // An external caller may pass a two-method api. Relinking must degrade to reporting rather
+  // than throwing on a missing method. (verify-scratch passes the whole module, so it can delete.)
   const api = sink();
   api.written.set('ACCT_A', [{ id: 'existing-1', imported_id: 'xin', amount: 70000, date: '2026-08-27' }]);
   const r = await loadRows(PAIR_ROWS(), XFER_MAPPING, api, () => null, XOPTS);
@@ -1139,4 +1139,58 @@ test('a pair already written as a transfer is not relinked on the next run', asy
   assert.deepEqual(api.deleted, []);
   assert.equal(r.transfersRelinked, 0);
   assert.equal(r.imported, 0);
+});
+
+test('a leg present in TWO accounts is never relinked — one copy would survive and double', async () => {
+  // The mapping-change state this file's own dedupe comments describe: the same source row was
+  // written under an earlier mapping and again under the current one, so it exists twice. A flat
+  // id -> row map keeps only the last one seen, so a relink deletes one copy, writes the transfer
+  // over the top, and the surviving copy plus Actual's mirrored leg double the money. Refusing is
+  // the only safe answer: the tool cannot know which copy the human wants.
+  const mapping = { ...XFER_MAPPING, spare: 'ACCT_C' };
+  const api = deletingSink(new Map([
+    ['ACCT_A', [{ id: 'copyA', imported_id: 'xin', amount: 70000, date: '2026-08-27' }]],
+    ['ACCT_C', [{ id: 'copyC', imported_id: 'xin', amount: 70000, date: '2026-08-27' }]],
+  ]));
+  const r = await loadRows(PAIR_ROWS(), mapping, api, () => null, XOPTS);
+  assert.deepEqual(api.deleted, [], 'an ambiguous duplicate must not be deleted');
+  assert.equal(r.transfersRelinked, 0);
+  assert.equal(r.transfersAlreadySeparate, 1, 'falls back to reporting, and says so');
+});
+
+test('a split parent is never deleted — the subtransactions go with it', async () => {
+  const api = deletingSink(new Map([['ACCT_A', [
+    { id: 'existing-1', imported_id: 'xin', amount: 70000, date: '2026-08-27',
+      is_parent: true, subtransactions: [{ amount: 40000 }, { amount: 30000 }] },
+  ]]]));
+  const r = await loadRows(PAIR_ROWS(), XFER_MAPPING, api, () => null, XOPTS);
+  assert.deepEqual(api.deleted, []);
+  assert.equal(r.transfersAlreadySeparate, 1);
+});
+
+test('a row carrying a JOINED id is never deleted — it stands for two source rows', async () => {
+  // A transfer this tool already wrote, whose transfer_id never got set because Actual accepted
+  // the write and declined to link. Deleting it replaces a transfer covering two source rows with
+  // one covering a different pair, and the third row's money is simply gone.
+  const api = deletingSink(new Map([['ACCT_A', [
+    { id: 'existing-1', imported_id: 'xin+zzz', amount: 70000, date: '2026-08-27' },
+  ]]]));
+  const r = await loadRows(PAIR_ROWS(), XFER_MAPPING, api, () => null, XOPTS);
+  assert.deepEqual(api.deleted, []);
+  assert.equal(r.transfersRelinked, 0);
+});
+
+test('a delete that succeeds and a write that then fails is still synced', async () => {
+  // The whole point of putting the deletes inside the try. Without the sync the deletion sits in
+  // the local cache unsynced, and the safety net the comment promises never fires because it was
+  // gated on `imported > 0` and nothing was imported.
+  const api = deletingSink(new Map([['ACCT_A', [
+    { id: 'existing-1', imported_id: 'xin', amount: 70000, date: '2026-08-27' },
+  ]]]));
+  let synced = 0;
+  api.sync = async () => { synced += 1; };
+  api.addTransactions = async () => { throw new Error('server 500'); };
+  await assert.rejects(() => loadRows(PAIR_ROWS(), XFER_MAPPING, api, () => null, XOPTS), /server 500/);
+  assert.deepEqual(api.deleted, ['existing-1'], 'the delete did happen');
+  assert.equal(synced, 1, 'so it has to be synced, or the local cache and the server disagree');
 });

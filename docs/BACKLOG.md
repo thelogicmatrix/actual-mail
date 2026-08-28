@@ -19,10 +19,9 @@ Raw drops go to [backlog/INBOX.md](backlog/INBOX.md).
 - **Cross-source double-count, narrowed 2026-08-27.** Two legs now pair and are written as one
   two-sided transfer where all five conditions hold — same run, same currency, within two minutes,
   non-zero and equal and opposite, different resolved Actual accounts, and each the other's only
-  candidate — so that case is no longer flagged by hand. Three cases are left. Legs that arrive in
-  *different* runs, a source down for a run being enough, are never candidates; joining them means
-  editing transactions already in the budget, declined on 2026-08-27 rather than deferred, so this
-  is a limitation to state rather than work to schedule. Legs with more than one candidate between
+  candidate — so that case is no longer flagged by hand. Two cases are left. Legs that arrive in
+  *different* runs are now **relinked** as of 2026-08-28, reversing the 2026-08-27 decision: the
+  stale row is deleted and the pair written fresh. Built, not scheduled. Legs with more than one candidate between
   them are **refused as ambiguous** rather than guessed at and import separately, which is the
   intended behaviour and not a defect. **Cross-currency transfers are not detected at all**, since
   two legs in different currencies are not equal and opposite and identifying the pair would depend

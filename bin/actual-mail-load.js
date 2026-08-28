@@ -350,7 +350,10 @@ try {
   // dry run take a DIFFERENT code path from the real one, which is the failure a rehearsal
   // exists to rule out.
   const sink = { getTransactions: api.getTransactions,
-    deleteTransaction: async (id) => local(`WOULD DELETE ${id}  (stale leg of a relinked transfer)`),
+    // Present but inert. The METHOD has to exist or loadRows takes the non-deleting branch and
+    // the rehearsal proves nothing about the path the real run will take. Reporting is left to
+    // onDelete below, so there is exactly one line per deletion and it is in the right tense.
+    deleteTransaction: async () => {},
     addTransactions: async (accountId, txns) => {
     for (const t of txns) {
       local(`DRY ${t.date} ${String(t.amount).padStart(9)}  ${accountId}  `
@@ -366,7 +369,8 @@ try {
   // A delete is the one destructive thing this tool does, so every one of them is named on
   // stdout. Not stderr: a transaction id is budget data and stderr becomes the Discord body.
   const onDelete = ({ txnId, accountId }) =>
-    local(`DELETED ${txnId} in ${accountId}  (stale leg, replaced by a transfer)`);
+    local(`${dryRun ? 'WOULD DELETE' : 'DELETED'} ${txnId} in ${accountId}`
+      + '  (stale leg, replaced by a transfer)');
 
   const { imported, converted, skipped, alreadyPresent, untracked,
           transfers, transfersAlreadySeparate, transfersRelinked, ambiguous } = await loadRows(

@@ -238,9 +238,17 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
       // reconciled row is one the human has balanced, and a row that is already a transfer is
       // not stale at all. Both parts of a joined id point at the same object.
       const info = { txnId: t.id, accountId, full: id,
-        reconciled: Boolean(t.reconciled), isTransfer: Boolean(t.transfer_id) };
-      present.set(id, info);
-      for (const part of id.split('+')) { local.add(part); seen.add(part); present.set(part, info); }
+        reconciled: Boolean(t.reconciled), isTransfer: Boolean(t.transfer_id),
+        // A split parent is returned grouped and deleting it deletes every child with it, so the
+        // categories the human typed go too. Not money, but not ours to throw away either.
+        isSplit: Boolean(t.is_parent || t.subtransactions?.length) };
+      // An ARRAY, not a single entry. The same imported_id legitimately exists in two accounts
+      // after a mapping change - the dedupe comments above describe exactly that - and a
+      // last-wins map hid the second copy. A relink then deleted one, wrote the transfer over the
+      // top, and the surviving copy plus Actual's mirrored leg DOUBLED the money, silently.
+      const add = (k) => { if (!present.has(k)) present.set(k, []); present.get(k).push(info); };
+      add(id);
+      for (const part of id.split('+')) { local.add(part); seen.add(part); if (part !== id) add(part); }
     }
     seenInAccount.set(accountId, local);
   }
@@ -261,8 +269,8 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   // alarm this file already fixed once. Neither leg in the budget: write the transfer. One leg
   // present: not a pair at all. Both rows go through as ordinary transactions, the dedupe drops
   // the leg that is already there and writes the one that is not, and the count says a transfer
-  // was left unlinked. Unlinked rather than joined up, because linking would mean editing
-  // transactions already in the budget.
+  // was left unlinked. Superseded 2026-08-28: such a pair is now RELINKED, the stale row deleted and the
+  // pair written fresh. See the relink branch below and docs/DECISIONS.md.
   //
   // Known gap, deliberately not solved: this tests CURRENT ids only, so a leg sitting under a
   // pre-account legacy id is invisible here and the pair is kept and written. What happens next
@@ -312,9 +320,9 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
       refused.add(into.id);
     }
   }
-  // Deleting is optional capability, not a requirement: scripts/verify-scratch.js and any
-  // external caller pass a two-method api, and those must keep the old reporting behaviour
-  // rather than throw on a missing method.
+  // Deleting is optional capability, not a requirement: an external caller may pass a
+  // two-method api, and that must keep the old reporting behaviour rather than throw on a
+  // missing method. scripts/verify-scratch.js passes the whole module, so it does delete.
   const canDelete = typeof api.deleteTransaction === 'function';
   const toDelete = [];
   // A deleted row's ids must leave the dedupe sets, or the transfer we are about to write is
@@ -341,8 +349,30 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
     // balanced that period, and a delete would unbalance it) or is already part of a transfer
     // (it is not stale). Both are deliberately conservative: the cost of reporting is a missing
     // link, the cost of deleting the wrong row is money.
-    const stale = [...new Set([out.id, into.id].map((id) => present.get(id)).filter(Boolean))];
-    if (canDelete && stale.length && stale.every((e) => !e.isTransfer && !e.reconciled)) {
+    const at = (id) => present.get(id) ?? [];
+    const stale = [...new Set([out.id, into.id].flatMap(at))];
+    // Every refusal below costs a link and nothing else. Deleting the wrong row costs money or
+    // work the human cannot get back, so each one errs the same way.
+    const safe = stale.every((e) => (
+      !e.isTransfer            // already linked, so not stale at all
+      && !e.reconciled         // the human balanced that period; a delete unbalances it
+      && !e.isSplit            // deleting the parent deletes the categories they typed
+      && !e.full.includes('+') // a joined id stands for TWO source rows, not this one
+    ));
+    // And exactly one row per id: two copies means the tool cannot know which the human wants.
+    const unambiguous = [out.id, into.id].every((id) => at(id).length <= 1);
+    // The replacement write has to be able to LAND. The dedupe filter also tests pre-account
+    // legacy digests against the written account's set, so a movement present under both a
+    // legacy and a current id would have its current row deleted here and its replacement
+    // filtered there: money gone, nothing written, and `imported` zero so nothing even reports
+    // it. Narrow - legacy ids stopped being written on 2026-08-06 - and the cheapest possible
+    // guard against the worst outcome in this function.
+    const writeAccount = mapping[out.account];
+    const legacyHere = seenInAccount.get(writeAccount);
+    const writable = !legacyHere || ![out, into]
+      .filter((r) => r.source && r.raw_ref)
+      .some((r) => legacyHere.has(rowId(r.source, r.raw_ref)));
+    if (canDelete && stale.length && safe && unambiguous && writable) {
       for (const e of stale) { toDelete.push(e); forget(e); }
       transfersRelinked += 1;
       return true;
@@ -512,7 +542,10 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
     // forever, while every run afterwards reports healthy. (api.shutdown() does sync, inside its
     // own `catch {}`, so it cannot be relied on either.) Sync what landed, THEN rethrow: the run
     // still fails loudly, but the local cache is not lying to the retry.
-    if (imported > 0 && typeof api.sync === 'function') {
+    // `|| toDelete.length`: deletes run BEFORE the writes, so a write that throws leaves
+    // `imported` at zero with a deletion already applied to the local cache. Gating the sync
+    // on the write count meant the one case this catch exists for was the one it skipped.
+    if ((imported > 0 || toDelete.length) && typeof api.sync === 'function') {
       // A failed sync here changes nothing worth reporting over the failure being rethrown —
       // that one is already fatal and names the real cause.
       try { await api.sync(); } catch { /* the original throw is the one that matters */ }
