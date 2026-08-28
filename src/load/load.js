@@ -328,6 +328,9 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   // two-method api, and that must keep the old reporting behaviour rather than throw on a
   // missing method. scripts/verify-scratch.js passes the whole module, so it does delete.
   const canDelete = typeof api.deleteTransaction === 'function';
+  // Pairs already linked in the budget under their own single ids. Both legs are accounted
+  // for — one as the row itself, the other as the mirror Actual made — so neither is written.
+  const alreadyLinked = new Set();
   const toDelete = [];
   // A deleted row's ids must leave the dedupe sets, or the transfer we are about to write is
   // filtered out as already present and the money disappears with the row.
@@ -355,6 +358,24 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
     // link, the cost of deleting the wrong row is money.
     const at = (id) => present.get(id) ?? [];
     const stale = [...new Set([out.id, into.id].flatMap(at))];
+
+    // Already a transfer, just not under a joined id — which is what a pair linked by hand in the
+    // Actual UI looks like: `transfer_id` set, its own single imported_id, so the joined-id early
+    // return above cannot see it. There is nothing to do and nothing wrong, so it must not land in
+    // the "left unlinked" count, which would then fire on every run forever over a pair that IS
+    // linked. Same class as the count that once said both legs were present when one was dropped.
+    // Still refused, so the licence stands down: a counterpart demonstrably exists.
+    if (stale.some((e) => e.isTransfer)) {
+      refused.add(out.id);
+      refused.add(into.id);
+      // BOTH legs, not just the one holding the imported_id. A transfer has a mirrored side that
+      // Actual created and that carries no imported_id of its own, so the dedupe cannot see it —
+      // and this pair's other row IS that side. Letting it through writes the money a second
+      // time, beside a mirror nothing can match it against.
+      alreadyLinked.add(out.id);
+      alreadyLinked.add(into.id);
+      return false;
+    }
     // Every refusal below costs a link and nothing else. Deleting the wrong row costs money or
     // work the human cannot get back, so each one errs the same way.
     const safe = stale.every((e) => (
@@ -394,7 +415,7 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
 
   // The written leg's target and partner, and the set of legs Actual will create for us.
   const pairedOut = new Map(booked.map(({ out, into }) => [out.id, into]));
-  const suppressed = new Set(booked.map(({ into }) => into.id));
+  const suppressed = new Set([...booked.map(({ into }) => into.id), ...alreadyLinked]);
   // Keyed by the transaction OBJECT, not its imported_id: two rows in one batch can carry one
   // id, and the object is what the dedupe filter hands back.
   const transferTo = new Map();
