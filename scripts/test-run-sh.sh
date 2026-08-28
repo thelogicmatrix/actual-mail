@@ -554,3 +554,22 @@ check "and it still tried" "1" "$(wc -l <"$ALERTS")"
 
 printf '\n%s\n' "$([ $FAILURES -eq 0 ] && echo 'all checks passed' || echo "$FAILURES check(s) failed")"
 exit $((FAILURES > 0))
+
+# --- a rehearsal must actually rehearse ---------------------------------------------------
+# ACTUAL_MAIL_DRY_RUN is read by the loader INSIDE the container, and the container's whole
+# environment comes from the two --env-file arguments. So the obvious `ACTUAL_MAIL_DRY_RUN=1
+# ./run.sh` set it in the calling shell and nowhere the loader could see it, and did a real run
+# against a live budget while the operator believed nothing was being written. The RUNBOOK tells
+# you to run one cadence by hand before trusting cron, so this is the invocation that gets typed.
+printf 'ALERT_WEBHOOK_URL=http://127.0.0.1:9/stub\n' >"$T/home/config.env"
+: >"$DOCKERARGS"
+run ACTUAL_MAIL_SWEEP=0 ACTUAL_MAIL_DRY_RUN=1
+check "ACTUAL_MAIL_DRY_RUN set in the environment reaches the container" "yes" \
+      "$(grep -q 'ACTUAL_MAIL_DRY_RUN=1' "$DOCKERARGS" && echo yes || echo no)"
+
+# And it must not appear when unset, or every cron run would carry an empty value into the
+# container for a variable the loader compares against the string '1'.
+: >"$DOCKERARGS"
+run ACTUAL_MAIL_SWEEP=0
+check "and is absent when unset, so cron is unchanged" "no" \
+      "$(grep -q 'ACTUAL_MAIL_DRY_RUN' "$DOCKERARGS" && echo yes || echo no)"

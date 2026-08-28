@@ -405,6 +405,17 @@ for f in "$HERE/.env" "$HERE/config.env"; do
 done
 
 docker_run() {
+  # ACTUAL_MAIL_DRY_RUN is read by the LOADER, inside the container, and the container's whole
+  # environment comes from the two --env-file arguments below. So `ACTUAL_MAIL_DRY_RUN=1
+  # ./run.sh` set the variable in this shell and nowhere the loader could see it, and performed
+  # a REAL run while the operator believed they were rehearsing — measured on 2026-08-28, four
+  # rows into a live budget. On a money path that is the wrong direction to fail: the rehearsal
+  # writes. Forwarded only when set, so cron is byte-for-byte unchanged. The detection further
+  # down still reads the loader's own `^dry run:` line rather than this variable, because a
+  # value set in config.env reaches the container without passing through here at all.
+  local dry=()
+  [ -n "${ACTUAL_MAIL_DRY_RUN:-}" ] && dry=(-e "ACTUAL_MAIL_DRY_RUN=$ACTUAL_MAIL_DRY_RUN")
+
   # The Actual server is a sibling container; reaching it by name needs its network.
   # Its externally-facing URL is not routable from inside a container.
   #
@@ -418,6 +429,7 @@ docker_run() {
     --env-file "$HERE/.env" --env-file "$HERE/config.env" \
     -e ACTUAL_MAIL_MAPPING=/app/mapping.json \
     -e ACTUAL_DATA_DIR=/app/.actual-cache \
+    ${dry[@]+"${dry[@]}"} \
     -v "$HERE/mapping.json:/app/mapping.json:ro" \
     -v "$HERE/cache:/app/.actual-cache" \
     "$@"
