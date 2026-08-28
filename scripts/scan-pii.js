@@ -46,7 +46,7 @@ import { pathToFileURL } from 'node:url';
 // BOTH ends anchored, against a fixed list of domains. `^noreply@` alone pinned the local part
 // on the reasoning that the local part is the payload — true for an identity and false for
 // infrastructure, which this file's own comment below says is equally unpublishable:
-// `noreply@obelisk.<private domain>` passed the gate and published a private hostname.
+// `noreply@<private-host>.<private-domain>` passed the gate and published a private hostname.
 const ALLOWED = [
   /^TEST [A-Z]+(?: [A-Z]{2})?$/,
   // The account rule's placeholder form: no digit anywhere in the match except a trailing run
@@ -159,12 +159,16 @@ function literalRules(root) {
 
 const global_ = (re) => new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
 
-export function scanText(text, extraRules = []) {
+// `structural: false` is the self exemption, and it is the ONLY thing that exemption waives.
+// See SELF_PATHS below: waiving the literal rules too was a real leak.
+export function scanText(text, extraRules = [], { structural = true } = {}) {
   const hits = [];
-  for (const [rule, re] of STRUCTURAL) {
-    for (const m of text.matchAll(global_(re))) {
-      if (ALLOWED.some((ok) => ok.test(m[0]))) continue;
-      hits.push({ rule, match: m[0] });
+  if (structural) {
+    for (const [rule, re] of STRUCTURAL) {
+      for (const m of text.matchAll(global_(re))) {
+        if (ALLOWED.some((ok) => ok.test(m[0]))) continue;
+        hits.push({ rule, match: m[0] });
+      }
     }
   }
   // ALLOWED deliberately does NOT apply here. A literal rule is a hand-authored "always
@@ -195,6 +199,14 @@ export const repoRoot = () =>
 // with the exemption lifted turns up 153 structural hits the gate could never report. All 153
 // are deliberate synthetic test positives today; the point is that a path cannot know that, and
 // the next revision to land is exempt before anyone has read it.
+//
+// STRUCTURAL rules only. The exemption used to waive every rule, literal ones included, and that
+// is the one thing it cannot afford to waive: a literal rule is a hand-authored "always flag this
+// string", and these two files are the likeliest in the tree to quote one — the gate has to name
+// the shapes it looks for, and its test has to hold examples. A private host's name sat in both
+// from the publication commit and was reported for the first time when an unrelated edit broke
+// the hash match, i.e. the blind spot was permanent for exactly the version being published.
+// Waiving structural stays right: this file quotes every shape it looks for, by necessity.
 //
 // `private.example.json` used to be here and must not be. It is the template whose whole purpose
 // is to hold a person's real name, email and account nicknames, one typo away from the gitignored
@@ -341,12 +353,16 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       continue;
     }
     const hash = contentHash(text);
-    if (reviewed.has(hash) || SELF_REVIEWED.has(hash)) continue;
+    if (SELF_REVIEWED.has(hash)) continue;
+    // The version under review: structural waived, literal rules still applied. See SELF_PATHS.
+    const selfExempt = reviewed.has(hash);
     // An unreviewed revision of the gate or its test. Named with its hash so the findings below
     // can be read once and the hash pasted into SELF_REVIEWED — see the comment there.
-    if (SELF_PATHS.has(bare)) console.error(`${path}: unreviewed version of the gate, sha256 ${hash}`);
+    if (SELF_PATHS.has(bare) && !selfExempt) {
+      console.error(`${path}: unreviewed version of the gate, sha256 ${hash}`);
+    }
     scanned += 1;
-    for (const hit of scanText(text, rules)) {
+    for (const hit of scanText(text, rules, { structural: !selfExempt })) {
       console.error(`${path}: [${hit.rule}] ${hit.match}`);
       findings += 1;
     }

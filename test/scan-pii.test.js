@@ -158,7 +158,7 @@ test('noreply addresses are allowed, lookalikes are not', () => {
 // the payload". True for an identity and false for infrastructure, which this gate says is
 // equally unpublishable — a private hostname rode out on a noreply address and published fine.
 test('a private hostname on a noreply address is still a leak', () => {
-  const hits = scanText('from noreply@obelisk.internal.example-corp.net');
+  const hits = scanText('from noreply@vault-host.internal.example-corp.net');
   assert.equal(hits.length, 1);
   assert.equal(hits[0].rule, 'email address');
 });
@@ -384,6 +384,28 @@ test('a superseded revision of the scanner itself is scanned, not exempt by path
     assert.equal(run.status, 1, `expected exit 1, got ${run.status}\n${run.stdout}${run.stderr}`);
     assert.match(run.stderr, /scripts\/scan-pii\.js: unreviewed version of the gate, sha256 [0-9a-f]{64}/);
     assert.match(run.stderr, /someone@gmail\.com/);
+  });
+});
+
+// The exemption waived EVERY rule for the checked-out copy of the gate and its test, so the two
+// files most likely to quote a private literal were the two the literal rules could never see.
+// One did: a private host's name sat in both from the publication commit and was reported for
+// the first time when an unrelated edit broke the hash match. Structural rules stay waived --
+// this file necessarily quotes every shape it looks for.
+test('the checked-out gate is still checked against literal rules', () => {
+  inTempRepo((dir, git) => {
+    mkdirSync(join(dir, 'scripts'));
+    writeFileSync(join(dir, 'scripts/scan-pii.js'),
+      '// deployed on vault-host.private-example.test, ask someone@gmail.com\n');
+    writeFileSync(join(dir, 'private.local.json'),
+      '{"literals":[{"pattern":"vault-host\\\\.private-example\\\\.test"}]}\n');
+    git('add', 'scripts/scan-pii.js');
+
+    const run = runScanner(dir);
+    assert.equal(run.status, 1, `expected exit 1, got ${run.status}\n${run.stdout}${run.stderr}`);
+    assert.match(run.stderr, /vault-host\.private-example\.test/);
+    // Waived, and it has to stay waived: the gate's own source quotes every shape it looks for.
+    assert.doesNotMatch(run.stderr, /someone@gmail\.com/);
   });
 });
 
