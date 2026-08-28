@@ -1054,3 +1054,89 @@ test('a pot move out of an untracked account throws even when the pot is unmappe
       fakeApi(), () => null, { transferPayeeFor: (id) => `payee-of-${id}` }),
     /untracked account "cash"/);
 });
+
+// --- relinking a pair whose counterpart is already in the budget -------------------------
+//
+// The legs of one transfer routinely arrive in different runs: the Trust alert is an email and
+// the Wise leg comes from an API, and an hourly cadence splits them whenever they straddle the
+// boundary. Until now the second leg imported as an ordinary transaction and the run said
+// "1 transfer(s) left unlinked", which is accurate and permanent — the pair never becomes a
+// transfer no matter how many times it runs. Deleting the stale leg and writing the transfer
+// fresh uses only primitives already proven here: converting a row in place is NOT used,
+// because Actual accepts the payee change and silently declines to create the counterpart.
+
+// A sink that can delete, and that can be seeded with what the budget already holds.
+function deletingSink(seed = new Map()) {
+  const s = sink();
+  for (const [acct, txns] of seed) s.written.set(acct, [...txns]);
+  s.deleted = [];
+  s.deleteTransaction = async (id) => {
+    s.deleted.push(id);
+    for (const [acct, txns] of s.written) {
+      s.written.set(acct, txns.filter((t) => t.id !== id));
+    }
+  };
+  return s;
+}
+
+const PAIR_ROWS = () => [
+  xrow({ id: 'out', account: 'uob', amount: '-700.00', raw_ref: '<u>' }),
+  xrow({ id: 'in', account: 'main', amount: '700.00', raw_ref: '<t>' }),
+];
+const XOPTS = { reconciledThrough: '2026-07-26', transferPayeeFor: xferPayee };
+
+test('a leg already in the budget is deleted and the pair is written as a transfer', async () => {
+  const api = deletingSink(new Map([['ACCT_A', [
+    { id: 'existing-1', imported_id: 'xin', amount: 70000, date: '2026-08-27' },
+  ]]]));
+  const r = await loadRows(PAIR_ROWS(), XFER_MAPPING, api, () => null, XOPTS);
+  assert.deepEqual(api.deleted, ['existing-1']);
+  assert.equal(r.transfers, 1);
+  assert.equal(r.transfersRelinked, 1);
+  assert.equal(r.transfersAlreadySeparate, 0, 'it was linked, not left');
+  const written = api.written.get('ACCT_B');
+  assert.equal(written.length, 1);
+  assert.equal(written[0].imported_id, 'xout+xin', 'the joined id, so neither source row re-imports');
+  assert.equal(written[0].payee, 'payee-of-ACCT_A');
+});
+
+test('a reconciled leg is never deleted — the human balanced that period', async () => {
+  const api = deletingSink(new Map([['ACCT_A', [
+    { id: 'existing-1', imported_id: 'xin', amount: 70000, date: '2026-08-27', reconciled: true },
+  ]]]));
+  const r = await loadRows(PAIR_ROWS(), XFER_MAPPING, api, () => null, XOPTS);
+  assert.deepEqual(api.deleted, []);
+  assert.equal(r.transfersRelinked, 0);
+  assert.equal(r.transfersAlreadySeparate, 1, 'falls back to the old behaviour, and says so');
+});
+
+test('a leg that is already part of a transfer is left completely alone', async () => {
+  const api = deletingSink(new Map([['ACCT_A', [
+    { id: 'existing-1', imported_id: 'xin', amount: 70000, date: '2026-08-27', transfer_id: 'other-side' },
+  ]]]));
+  const r = await loadRows(PAIR_ROWS(), XFER_MAPPING, api, () => null, XOPTS);
+  assert.deepEqual(api.deleted, []);
+  assert.equal(r.transfersRelinked, 0);
+});
+
+test('a caller whose api cannot delete keeps the old behaviour', async () => {
+  // scripts/verify-scratch.js and any external caller pass a two-method api. Relinking must
+  // degrade to reporting rather than throwing on a missing method.
+  const api = sink();
+  api.written.set('ACCT_A', [{ id: 'existing-1', imported_id: 'xin', amount: 70000, date: '2026-08-27' }]);
+  const r = await loadRows(PAIR_ROWS(), XFER_MAPPING, api, () => null, XOPTS);
+  assert.equal(r.transfersRelinked, 0);
+  assert.equal(r.transfersAlreadySeparate, 1);
+});
+
+test('a pair already written as a transfer is not relinked on the next run', async () => {
+  // The idempotence check. The joined id is in the budget, so the run must delete nothing and
+  // write nothing, every hour, forever.
+  const api = deletingSink(new Map([['ACCT_B', [
+    { id: 'existing-x', imported_id: 'xout+xin', amount: -70000, date: '2026-08-27' },
+  ]]]));
+  const r = await loadRows(PAIR_ROWS(), XFER_MAPPING, api, () => null, XOPTS);
+  assert.deepEqual(api.deleted, []);
+  assert.equal(r.transfersRelinked, 0);
+  assert.equal(r.imported, 0);
+});

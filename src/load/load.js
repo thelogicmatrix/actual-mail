@@ -129,12 +129,14 @@ export function toActualTxn(row, fx = null) {
 }
 
 export async function loadRows(rows, mapping, api, rateLookup = () => null, opts = {}) {
-  const { reconciledThrough = null, transferPayeeFor = null, onTransfer = () => {} } = opts;
+  const { reconciledThrough = null, transferPayeeFor = null, onTransfer = () => {},
+          onDelete = () => {} } = opts;
   const byAccount = new Map();
   const legacyIds = new Map();
   let converted = 0;
   let transfers = 0;
   let transfersAlreadySeparate = 0;
+  let transfersRelinked = 0;
 
   // The floor is applied HERE rather than inside the loop, because transfer pairing must see
   // exactly the rows that will be written. A pair whose other leg is already reconciled is
@@ -210,6 +212,7 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   const dates = scoped.map((r) => sgDay(r.date)).sort();
   const seen = new Set();
   const seenInAccount = new Map();
+  const present = new Map();
   // One read per MAPPED account, not per written-to account: an account with nothing to write
   // this run is exactly where a mirrored leg hides. No rows means no reads at all, rather than
   // asking the API for a date range this run has no dates for.
@@ -230,7 +233,14 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
       const id = String(t.imported_id);
       local.add(id);
       seen.add(id);
-      for (const part of id.split('+')) { local.add(part); seen.add(part); }
+      // The transaction itself, not just its id, because relinking a pair whose counterpart is
+      // already here has to delete that row and must first know whether it is safe to: a
+      // reconciled row is one the human has balanced, and a row that is already a transfer is
+      // not stale at all. Both parts of a joined id point at the same object.
+      const info = { txnId: t.id, accountId, full: id,
+        reconciled: Boolean(t.reconciled), isTransfer: Boolean(t.transfer_id) };
+      present.set(id, info);
+      for (const part of id.split('+')) { local.add(part); seen.add(part); present.set(part, info); }
     }
     seenInAccount.set(accountId, local);
   }
@@ -302,9 +312,41 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
       refused.add(into.id);
     }
   }
+  // Deleting is optional capability, not a requirement: scripts/verify-scratch.js and any
+  // external caller pass a two-method api, and those must keep the old reporting behaviour
+  // rather than throw on a missing method.
+  const canDelete = typeof api.deleteTransaction === 'function';
+  const toDelete = [];
+  // A deleted row's ids must leave the dedupe sets, or the transfer we are about to write is
+  // filtered out as already present and the money disappears with the row.
+  const forget = (info) => {
+    const parts = [info.full, ...info.full.split('+')];
+    for (const p of parts) seen.delete(p);
+    const local = seenInAccount.get(info.accountId);
+    if (local) for (const p of parts) local.delete(p);
+  };
+
   const booked = pairs.filter(({ out, into }) => {
     if (seen.has(`${out.id}+${into.id}`)) return true;
     if (!seen.has(out.id) && !seen.has(into.id)) return true;
+
+    // The legs of one transfer routinely arrive in different runs — an email leg and an API leg
+    // straddling the hourly boundary — and reporting that forever never makes it a transfer.
+    // Delete the stale row and write the pair fresh, which uses only the create path already
+    // proven above. Converting the existing row in place is NOT used: Actual accepts the payee
+    // change and silently declines to create the counterpart, which cost a live 2.53 on
+    // 2026-08-28 before it was noticed.
+    //
+    // Refused, and left to the old reporting, when any leg present is reconciled (the human has
+    // balanced that period, and a delete would unbalance it) or is already part of a transfer
+    // (it is not stale). Both are deliberately conservative: the cost of reporting is a missing
+    // link, the cost of deleting the wrong row is money.
+    const stale = [...new Set([out.id, into.id].map((id) => present.get(id)).filter(Boolean))];
+    if (canDelete && stale.length && stale.every((e) => !e.isTransfer && !e.reconciled)) {
+      for (const e of stale) { toDelete.push(e); forget(e); }
+      transfersRelinked += 1;
+      return true;
+    }
     transfersAlreadySeparate += 1;
     // BOTH legs, because refusing the pair also drops them out of `pairedOut`, and a row with
     // no partner falls through to the payee path below and may invent a leg into the very
@@ -423,6 +465,13 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
   let imported = 0;
   let alreadyPresent = 0;
   try {
+    // Before any write, so the transfer's mirrored leg cannot land beside the row it replaces.
+    // Inside the try, because a delete that succeeds and a write that then fails is exactly the
+    // partial state the catch below syncs and reports rather than hiding.
+    for (const e of toDelete) {
+      await api.deleteTransaction(e.txnId);
+      onDelete(e);
+    }
     for (const [accountId, txns] of byAccount) {
       const legacySeen = seenInAccount.get(accountId) ?? new Set();
       // The predicate ADDS to `seen`, which is what makes the filter dedupe the incoming batch
@@ -471,5 +520,5 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
     throw e;
   }
   return { imported, converted, skipped, alreadyPresent, untracked: untracked.length,
-           transfers, transfersAlreadySeparate, ambiguous };
+           transfers, transfersAlreadySeparate, transfersRelinked, ambiguous };
 }

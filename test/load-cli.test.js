@@ -119,9 +119,25 @@ const STUB = join(TMP, 'stub-actual.mjs');
 writeFileSync(STUB, `
 export const init = async () => {};
 export const downloadBudget = async () => {};
-export const getPayees = async () => [];
-export const getTransactions = async () => [];
+// Transfer payees for the two mapped accounts, so a pair can actually be booked. Without them
+// the loader refuses with "no transfer payee", which is correct but means no test here could
+// ever reach the transfer path at all.
+export const getPayees = async () => [
+  { id: 'xfer-a', name: 'A', transfer_acct: '00000000-0000-0000-0000-00000000000a' },
+  { id: 'xfer-b', name: 'B', transfer_acct: '00000000-0000-0000-0000-00000000000b' },
+];
+// Seeded with what the budget already holds, so a test can drive the relink path: a pair whose
+// counterpart is already a transaction. STUB_DELETES records every deletion, which is how the
+// dry-run test proves a rehearsal deletes nothing.
+export const getTransactions = async (accountId) =>
+  JSON.parse(process.env.STUB_EXISTING || '{}')[accountId] || [];
 export const addTransactions = async (id, txns) => txns.map((t) => t.imported_id);
+export const deleteTransaction = async (id) => {
+  if (process.env.STUB_DELETES) {
+    const { appendFileSync } = await import('node:fs');
+    appendFileSync(process.env.STUB_DELETES, id + String.fromCharCode(10));
+  }
+};
 export const sync = async () => {
   if (process.env.STUB_SYNC_FAIL === '1') throw new Error('stub: sync rejected');
 };
@@ -527,4 +543,46 @@ test('the in-force listing says how many rows each untracked key matched', () =>
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /wise-aud \(1 row/);
   assert.match(r.stdout, /wise-uad \(0 rows/);
+});
+
+// --- relinking a pair whose counterpart is already in the budget --------------------------
+
+const RELINK_ROWS = [
+  { ...ROW, id: 'r-out', account: '0000', amount: '-700.00', payee: 'somebody',
+    type: 'transfer_out', date: '2026-07-28T07:24:00+08:00', raw_ref: '<u>' },
+  { ...ROW, id: 'r-in', account: 'card', amount: '700.00', payee: 'somebody',
+    type: 'transfer_in', date: '2026-07-28T07:24:00+08:00', raw_ref: '<t>' },
+];
+// The `card` leg is already a plain transaction in the budget, as it would be after arriving in
+// an earlier run than its partner.
+const RELINK_EXISTING = JSON.stringify({
+  '00000000-0000-0000-0000-00000000000b': [
+    { id: 'existing-1', imported_id: 'r-in', amount: 70000, date: '2026-07-28' },
+  ],
+});
+
+test('a dry run reports the relink and deletes NOTHING', () => {
+  // The whole point of a rehearsal. A dry run that deletes a real transaction would be the worst
+  // possible version of the ACTUAL_MAIL_DRY_RUN bug this repo already fixed once.
+  const deletes = join(TMP, 'deletes-dry.log');
+  writeFileSync(deletes, '');
+  const r = run(RELINK_ROWS, {
+    STUB_EXISTING: RELINK_EXISTING, STUB_DELETES: deletes,
+    ACTUAL_MAIL_RECONCILED_THROUGH: '2026-07-01',
+  }, { stub: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(deletes, 'utf8'), '', 'a dry run must not delete a transaction');
+  assert.match(r.stdout, /WOULD DELETE/);
+});
+
+test('a real run deletes the stale leg and counts the relink', () => {
+  const deletes = join(TMP, 'deletes-real.log');
+  writeFileSync(deletes, '');
+  const r = run(RELINK_ROWS, {
+    STUB_EXISTING: RELINK_EXISTING, STUB_DELETES: deletes,
+    ACTUAL_MAIL_RECONCILED_THROUGH: '2026-07-01', ACTUAL_MAIL_DRY_RUN: '0',
+  }, { stub: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(deletes, 'utf8').trim(), 'existing-1');
+  assert.match(r.stderr, /1 transfer\(s\) relinked/);
 });

@@ -345,7 +345,13 @@ try {
   // already-present count is real; only the write is stubbed.
   // On stdout, not stderr: every one of these lines is an amount and a payee. Under run.sh a
   // dry run's stderr would be the body of a webhook alert.
-  const sink = { getTransactions: api.getTransactions, addTransactions: async (accountId, txns) => {
+  // A rehearsal must not delete. loadRows only relinks when the api can delete, so the sink
+  // carries the method and reports instead of performing it — dropping the method would make a
+  // dry run take a DIFFERENT code path from the real one, which is the failure a rehearsal
+  // exists to rule out.
+  const sink = { getTransactions: api.getTransactions,
+    deleteTransaction: async (id) => local(`WOULD DELETE ${id}  (stale leg of a relinked transfer)`),
+    addTransactions: async (accountId, txns) => {
     for (const t of txns) {
       local(`DRY ${t.date} ${String(t.amount).padStart(9)}  ${accountId}  `
         + `${t.payee ? `[transfer ${t.payee}]` : t.payee_name}`);
@@ -357,10 +363,15 @@ try {
   const onTransfer = ({ date, amount, from, to }) =>
     local(`TRANSFER ${date} ${String(amount).padStart(9)}  ${from} -> ${to}`);
 
+  // A delete is the one destructive thing this tool does, so every one of them is named on
+  // stdout. Not stderr: a transaction id is budget data and stderr becomes the Discord body.
+  const onDelete = ({ txnId, accountId }) =>
+    local(`DELETED ${txnId} in ${accountId}  (stale leg, replaced by a transfer)`);
+
   const { imported, converted, skipped, alreadyPresent, untracked,
-          transfers, transfersAlreadySeparate, ambiguous } = await loadRows(
+          transfers, transfersAlreadySeparate, transfersRelinked, ambiguous } = await loadRows(
     rows, mapping, dryRun ? sink : api, rateLookup,
-    { reconciledThrough, transferPayeeFor, onTransfer });
+    { reconciledThrough, transferPayeeFor, onTransfer, onDelete });
 
   const tail = `${converted ? `, ${converted} FX-estimated` : ''}`
     + `${skipped ? `, ${skipped} skipped as reconciled` : ''}`
@@ -371,6 +382,11 @@ try {
     + `${untracked ? `, ${untracked} untracked` : ''}`
     + `${alreadyPresent ? `, ${alreadyPresent} already present` : ''}`
     + `${transfers ? `, ${transfers} transfer(s)` : ''}`
+    // A relink DELETED a transaction that was already in the budget, which is the only
+    // destructive thing this tool does. It gets its own count rather than hiding inside
+    // the transfer count, because "2 transfers" and "2 transfers, one of which replaced a
+    // row you had categorised" are different facts.
+    + `${transfersRelinked ? `, ${transfersRelinked} transfer(s) relinked` : ''}`
     // At least one leg was already in the budget — an ordinary transaction, a transfer leg
     // written under an older mapping, or a row in another account — so the pair was refused
     // rather than linked — linking would mean editing a transaction already there. The

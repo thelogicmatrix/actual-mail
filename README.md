@@ -370,6 +370,39 @@ unmapped-account error instead, which is the better reason to follow the instruc
 itself is inside the budget, so a pot move out of an untracked account is a hard error rather
 than a row set quietly aside — the money really did arrive in the pot.
 
+### When one leg arrived in an earlier run
+
+The two legs of one transfer routinely arrive separately. A Trust alert is an email and the Wise
+leg comes from an API, and an hourly cadence splits them whenever they straddle the boundary. The
+second leg then finds the first already in your budget as an ordinary transaction.
+
+Those are **relinked**: the stale row is deleted and the pair is written fresh as one two-sided
+transfer, counted as `N transfer(s) relinked`. Deleting and re-creating rather than converting the
+existing row in place is deliberate, and measured. Actual accepts a payee change onto an existing
+transaction and then silently declines to create the counterpart, which on 2026-08-28 removed a
+real 2.53 from a live budget and reported success. Creating a transfer is the path the loader
+already uses for same-run pairs, and it works.
+
+**A relink deletes a transaction you may have edited.** The row's category, notes and any manual
+changes go with it. Every deletion is named on stdout, and the count is separate from `transfers`
+in the run line, because "2 transfers" and "2 transfers, one of which replaced a row you had
+categorised" are different facts.
+
+Two cases are refused and fall back to reporting `left unlinked`:
+
+- the existing row is **reconciled** — you have balanced that period, and deleting a row would
+  unbalance it
+- the existing row is **already part of a transfer** — it is not stale
+
+Relinking needs an api that can delete. A caller supplying only `getTransactions` and
+`addTransactions`, as `scripts/verify-scratch.js` does, keeps the old reporting behaviour rather
+than failing.
+
+The rule for what counts as a pair is unchanged and deliberately narrow: two minutes, same
+currency, equal and opposite, two different resolved accounts. Widening it to catch legs further
+apart is how a third-party payment that happens to match an amount becomes a phantom internal
+transfer.
+
 Pot moves are written as **two-sided transfers** rather than spends. The row's payee becomes
 the target account's transfer payee, so the money leaves one account and arrives in the other
 instead of vanishing into a category.
