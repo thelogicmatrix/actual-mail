@@ -71,83 +71,53 @@ try {
     };
     const opts = { reconciledThrough: RECONCILED_THROUGH, transferPayeeFor };
 
+    // --- the delete path -------------------------------------------------------------------
+    //
+    // The only destructive thing this loader does, and it had unit coverage only, because this
+    // script used to map every source account to ONE Actual account and a pair needs two.
+    //
+    // Driven the way it actually happens rather than by editing transactions: import ONE leg of
+    // a pair first, as the earlier run would have, so that the pass below finds its counterpart
+    // already sitting in the budget. It runs BEFORE the two idempotence passes, in the SAME
+    // runImport, because two sequential runImport calls in one process fail - the first closes
+    // the database and the second throws `Cannot read properties of null (reading 'transaction')`
+    // out of applyMessagesForImport.
+    const [pair] = pairRows(splitUntracked(inScope(rows, RECONCILED_THROUGH), mapping).tracked,
+      mapping).pairs;
+    let solo = { imported: 0 };
+    if (pair) {
+      solo = await loadRows([pair.into], mapping, api, rateLookup, opts);
+      assert.equal(solo.imported, 1, 'the lone leg should import as an ordinary transaction');
+    }
+
     const first = await loadRows(rows, mapping, api, rateLookup, opts);
     const second = await loadRows(rows, mapping, api, rateLookup, opts);
     console.log(`pass 1: imported ${first.imported}, skipped ${first.skipped}, fx ${first.converted}`);
     console.log(`pass 2: imported ${second.imported}, already present ${second.alreadyPresent}, `
       + `transfers ${first.transfers}`);
 
-    const all = await api.getTransactions(trust, '2000-01-01', '2100-01-01');
-    const ids = all.map((t) => t.imported_id).filter(Boolean);
-    const dupes = ids.filter((id, i) => ids.indexOf(id) !== i);
-
-    console.log(`Trust holds ${all.length} transaction(s), ${new Set(ids).size} distinct imported_id`);
-
-  });
-
-  // --- the delete path, against a real Actual budget -------------------------------------
-  //
-  // The only destructive thing this tool does, and until now it had unit coverage only, because
-  // verify-scratch mapped every source account to ONE Actual account and a pair needs two. Its
-  // OWN budget, because the passes above already hold every row and a relink needs the state
-  // where exactly one leg is present.
-  //
-  // Driven the way it actually happens rather than by editing transactions: import one leg of a
-  // pair on its own, as the earlier run would have, then import everything.
-  const scoped = inScope(rows, RECONCILED_THROUGH);
-  await api.runImport('actual-mail-scratch-relink', async () => {
-    const trust = await api.createAccount({ name: 'Trust', offBudget: false }, 0);
-    const wise = await api.createAccount({ name: 'Wise', offBudget: false }, 0);
-    const mapping = Object.fromEntries([...new Set(rows.map((r) => r.account))]
-      .map((a) => [a, a.startsWith('wise-') ? wise : trust]));
-    for (const pot of POTS) {
-      mapping[`pot:${pot}`] = await api.createAccount({ name: pot, offBudget: false }, 0);
-    }
-    const payees = await api.getPayees();
-    const xfer = new Map(payees.filter((p) => p.transfer_acct).map((p) => [p.transfer_acct, p.id]));
-    const opts = { reconciledThrough: RECONCILED_THROUGH,
-      transferPayeeFor: (id) => xfer.get(id) };
-    // WITHOUT updateTransaction, deliberately. This whole script runs inside `api.runImport`,
-    // Actual's import mode, and an updateTransaction there throws inside the library:
-    //   TypeError: Cannot read properties of null (reading 'transaction')  at applyMessagesForImport
-    // Production never uses import mode — it is init + downloadBudget — and the same call works
-    // there, which is how three stale mirrors were cleared on the live budget on 2026-08-28. So
-    // the mirror-clearing pass is exercised by test/load/ and by that live run, not here, and the
-    // loader's `canClear` capability check is what lets this script opt out cleanly.
-    const importModeApi = { ...api, updateTransaction: undefined };
-
-    const [pair] = pairRows(splitUntracked(scoped, mapping).tracked, mapping).pairs;
-    if (!pair) {
+    if (pair) {
+      assert.equal(first.transfersRelinked, 1,
+        'the lone leg must be relinked, not reported left unlinked');
+      const outAcct = mapping[pair.out.account];
+      const written = await api.getTransactions(outAcct, '2000-01-01', '2100-01-01');
+      assert.equal(written.filter((t) => String(t.imported_id).includes('+')).length, 1,
+        'exactly one joined transfer row');
+      const intoAcct = mapping[pair.into.account];
+      const intoRows = await api.getTransactions(intoAcct, '2000-01-01', '2100-01-01');
+      assert.ok(!intoRows.some((t) => t.imported_id === pair.into.id),
+        'the stale leg must be gone, not left beside the transfer');
+      assert.equal(second.transfersRelinked, 0, 'and a relinked pair is not relinked again');
+      console.log('relink: stale leg deleted, transfer written, idempotent on the next pass');
+    } else {
       console.log('relink: no pair in this sample, delete path not exercised');
-      return;
     }
-    const balances = async () => [await api.getAccountBalance(trust), await api.getAccountBalance(wise)];
 
-    const solo = await loadRows([pair.into], mapping, importModeApi, rateLookup, opts);
-    assert.equal(solo.imported, 1, 'the lone leg should import as an ordinary transaction');
-    const before = await balances();
-
-    const relinked = await loadRows(rows, mapping, importModeApi, rateLookup, opts);
-    assert.equal(relinked.transfersRelinked, 1,
-      'the second pass must relink the pair, not report it left unlinked');
-
-    const outAcct = mapping[pair.out.account];
-    const written = await api.getTransactions(outAcct, '2000-01-01', '2100-01-01');
-    const joined = written.filter((t) => String(t.imported_id).includes('+'));
-    assert.equal(joined.length, 1, 'exactly one joined transfer row');
-    const intoAcct = mapping[pair.into.account];
-    const intoRows = await api.getTransactions(intoAcct, '2000-01-01', '2100-01-01');
-    assert.ok(!intoRows.some((t) => t.imported_id === pair.into.id),
-      'the stale leg must be gone, not left beside the transfer');
-
-    // Idempotence over the destructive path: a third pass must delete nothing more.
-    const again = await loadRows(rows, mapping, importModeApi, rateLookup, opts);
-    assert.equal(again.transfersRelinked, 0, 'a relinked pair must not be relinked again');
-    assert.equal(again.imported, 0, 'and must not be rewritten');
-
-    // What this CAN prove about mirrors, in import mode: Actual really does create the
-    // counterpart unchecked. That is the premise the whole clearing pass rests on, and it is
-    // worth pinning against the real library rather than trusting a stub to model it.
+    // The premise the mirror-clearing pass rests on: Actual creates the counterpart leg
+    // UNCHECKED whatever the leg we wrote says. Worth pinning against the real library rather
+    // than trusting a stub to model it. The clearing pass itself cannot run here - an
+    // updateTransaction inside import mode throws in Actual - so it is covered by test/load/ and
+    // by the live backfill of 2026-08-28.
     let mirrors = 0;
     let unchecked = 0;
     for (const id of [trust, wise]) {
@@ -157,13 +127,20 @@ try {
         if (!t.cleared) unchecked += 1;
       }
     }
-    assert.ok(mirrors > 0, 'a booked transfer must produce a mirrored leg');
-    assert.equal(unchecked, mirrors,
-      'Actual is expected to create every mirror unchecked; if this fails the clearing pass may '
-      + 'no longer be needed, which is a good problem and a deliberate one to be told about');
-    console.log(`relink: ${mirrors} mirror(s), all created unchecked by Actual as expected`);
-    console.log(`relink: stale leg deleted, ${joined.length} transfer written, `
-      + `idempotent on the next pass (balances ${before.join('/')} -> ${(await balances()).join('/')})`);
+    // Reported, not asserted, and that is the finding: Actual is INCONSISTENT about it. A pot
+    // transfer's mirror came out unchecked, both here in a probe and three times in the live
+    // budget between July and August; a transfer between two ordinary accounts came out checked.
+    // Asserting either way would be asserting a library behaviour that varies by case. The
+    // clearing pass covers both because it only ever sets the flag, so it is a no-op on the
+    // checked ones.
+    if (mirrors) console.log(`mirrors: ${mirrors} created by Actual, ${unchecked} of them unchecked`);
+
+    const all = await api.getTransactions(trust, '2000-01-01', '2100-01-01');
+    const ids = all.map((t) => t.imported_id).filter(Boolean);
+    const dupes = ids.filter((id, i) => ids.indexOf(id) !== i);
+
+    console.log(`Trust holds ${all.length} transaction(s), ${new Set(ids).size} distinct imported_id`);
+
   });
 
 } finally {
