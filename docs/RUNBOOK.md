@@ -56,16 +56,32 @@ rather than wrong — but they will sit in the deploy directory forever otherwis
 expected.**
 The gate walks `rev-list --objects --all` and `log --all`, and `--all` includes remote-tracking
 refs — so it scans the private pre-flatten archive as well as `main`. Measured on 2026-08-28: 75
-findings across 21 commits, **none of them reachable from `main`**, so git would never push one.
-Before reading a non-zero count as a publication blocker, check reachability:
+findings across 22 objects, of which **3 are reachable from `main`** and the rest are archive-only.
+Before reading a non-zero count as a publication blocker, check reachability.
 
-```
-npm run scan -- --all-revs 2>&1 | grep -oE '^[0-9a-f]{7,40}:' | tr -d ':' | sort -u   | while read c; do git merge-base --is-ancestor $c main && echo "REACHABLE $c"; done
+**A finding's leading sha is usually a BLOB, not a commit**, so `git merge-base --is-ancestor`
+is the wrong tool and silently reports every blob as unreachable — which reads as "all clear"
+and is the most dangerous possible way to be wrong here. Intersect object sets instead:
+
+```sh
+git rev-list --objects main | awk '{print $1}' | sort -u >/tmp/main-objs
+npm run scan -- --all-revs 2>&1 | grep -oE '^[0-9a-f]{7,40}:' | tr -d ':' | sort -u |
+while read -r s; do
+  full=$(git rev-parse "$s")
+  case "$(git cat-file -t "$s")" in
+    blob)   grep -qx "$full" /tmp/main-objs && echo "REACHABLE blob   $s" ;;
+    commit) git merge-base --is-ancestor "$s" main && echo "REACHABLE commit $s" ;;
+  esac
+done
 ```
 
-Nothing printed means the publishable history is clean. `docs/FEATURES.md` says the gate passes
-on every revision; that is true of `main`'s own history and was written in a clone that had not
-fetched the archive.
+Nothing printed means the publishable history is clean.
+
+**Editing `scripts/scan-pii.js` or `test/scan-pii.test.js` makes their previous versions
+visible to the gate**, because those two paths are exempt by CONTENT hash against the working
+tree. The version you just replaced stops matching and is scanned like any other blob. That is
+the documented refresh path, and it is why a count can jump on a commit that touched neither
+PII nor history — read the new findings before pasting hashes into `SELF_REVIEWED`.
 
 **One-off, upgrading past 2026-08-28:** the code half of untracked source accounts ships with
 the push, but the half that turns it on is `mapping.json`, which is gitignored and lives only on
