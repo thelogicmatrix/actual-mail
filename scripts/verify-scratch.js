@@ -136,6 +136,17 @@ try {
     const again = await loadRows(rows, mapping, api, rateLookup, opts);
     assert.equal(again.transfersRelinked, 0, 'a relinked pair must not be relinked again');
     assert.equal(again.imported, 0, 'and must not be rewritten');
+
+    // Actual creates the counterpart leg unchecked whatever the written leg says, so the loader
+    // clears it. Checked here rather than only in a stub, because the unchecked default IS
+    // Actual's behaviour and a stub is exactly the wrong place to prove what Actual does.
+    for (const id of [trust, wise]) {
+      for (const t of await api.getTransactions(id, '2000-01-01', '2100-01-01')) {
+        if (!t.transfer_id || t.imported_id) continue;
+        assert.ok(t.cleared, `a transfer mirror was left unchecked: ${t.date} ${t.amount}`);
+      }
+    }
+    console.log('relink: every transfer mirror is cleared');
     console.log(`relink: stale leg deleted, ${joined.length} transfer written, `
       + `idempotent on the next pass (balances ${before.join('/')} -> ${(await balances()).join('/')})`);
   });
