@@ -241,7 +241,11 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
         reconciled: Boolean(t.reconciled), isTransfer: Boolean(t.transfer_id),
         // A split parent is returned grouped and deleting it deletes every child with it, so the
         // categories the human typed go too. Not money, but not ours to throw away either.
-        isSplit: Boolean(t.is_parent || t.subtransactions?.length) };
+        isSplit: Boolean(t.is_parent || t.subtransactions?.length),
+        // A row satisfying a schedule. Delete it and Actual shows that schedule as unpaid again,
+        // which invites the human to enter it by hand — and the worked example this feature is
+        // built around, a monthly transfer, is exactly what people schedule.
+        scheduled: Boolean(t.schedule) };
       // An ARRAY, not a single entry. The same imported_id legitimately exists in two accounts
       // after a mapping change - the dedupe comments above describe exactly that - and a
       // last-wins map hid the second copy. A relink then deleted one, wrote the transfer over the
@@ -358,6 +362,7 @@ export async function loadRows(rows, mapping, api, rateLookup = () => null, opts
       && !e.reconciled         // the human balanced that period; a delete unbalances it
       && !e.isSplit            // deleting the parent deletes the categories they typed
       && !e.full.includes('+') // a joined id stands for TWO source rows, not this one
+      && !e.scheduled          // deleting it re-opens the schedule as unpaid
     ));
     // And exactly one row per id: two copies means the tool cannot know which the human wants.
     const unambiguous = [out.id, into.id].every((id) => at(id).length <= 1);

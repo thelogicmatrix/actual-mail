@@ -11,7 +11,8 @@ import { readFileSync, mkdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import * as api from '@actual-app/api';
-import { loadRows, inScope, fxDatesFor } from '../src/load/load.js';
+import { loadRows, inScope, fxDatesFor, splitUntracked } from '../src/load/load.js';
+import { pairRows } from '../src/load/transfers.js';
 import { fetchRates, makeRateLookup, DEFAULT_MARKUP } from '../src/load/fx.js';
 
 const rows = readFileSync(0, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
@@ -40,11 +41,23 @@ await api.init({ dataDir });          // local only — no serverURL, no passwor
 try {
   await api.runImport('actual-mail-scratch', async () => {
     const trust = await api.createAccount({ name: 'Trust', offBudget: false }, 0);
+    // TWO accounts, not one. Every source account used to map to `trust`, and pairRows requires
+    // two DIFFERENT resolved accounts, so a transfer could never form here — which meant the
+    // transfer path and, later, the delete path were categorically unreachable in the one script
+    // that runs against a real Actual budget. Both rested entirely on a hand-written stub, and
+    // this feature has already shipped one behaviour no stub predicted: Actual accepting a payee
+    // change and silently declining to create the counterpart, which cost real money.
+    //
+    // The split mirrors the real mapping's shape rather than being arbitrary: Wise balances are
+    // their own account, everything a bank alert names is the bank account.
+    const wise = await api.createAccount({ name: 'Wise', offBudget: false }, 0);
+    const accountFor = (a) => (a.startsWith('wise-') ? wise : trust);
     // Every account the rows actually name, not three hardcoded Trust keys. The README teaches
     // `--source all` everywhere, whose first Wise row carries `wise-<currency>` — unmapped, and
     // loadRows hard-throws on an unmapped account, so the documented pipe died here. Derived
     // this way it also works for any parser a contributor adds.
-    const mapping = Object.fromEntries([...new Set(rows.map((r) => r.account))].map((a) => [a, trust]));
+    const mapping = Object.fromEntries(
+      [...new Set(rows.map((r) => r.account))].map((a) => [a, accountFor(a)]));
     for (const pot of POTS) {
       mapping[`pot:${pot}`] = await api.createAccount({ name: pot, offBudget: false }, 0);
     }
@@ -61,13 +74,50 @@ try {
     const first = await loadRows(rows, mapping, api, rateLookup, opts);
     const second = await loadRows(rows, mapping, api, rateLookup, opts);
     console.log(`pass 1: imported ${first.imported}, skipped ${first.skipped}, fx ${first.converted}`);
-    console.log(`pass 2: imported ${second.imported}, already present ${second.alreadyPresent}`);
+    console.log(`pass 2: imported ${second.imported}, already present ${second.alreadyPresent}, `
+      + `transfers ${first.transfers}`);
 
     const all = await api.getTransactions(trust, '2000-01-01', '2100-01-01');
     const ids = all.map((t) => t.imported_id).filter(Boolean);
     const dupes = ids.filter((id, i) => ids.indexOf(id) !== i);
 
     console.log(`Trust holds ${all.length} transaction(s), ${new Set(ids).size} distinct imported_id`);
+
+    // --- the delete path, against a real Actual budget -----------------------------------
+    //
+    // The only destructive thing this tool does, and until now it had unit coverage only. Drive
+    // it the way it actually happens: import ONE leg of a pair on its own, as an earlier run
+    // would have, then import everything. The loader must delete that row and write the pair as
+    // one transfer, and the two accounts must end up holding exactly the money they should.
+    const { tracked } = splitUntracked(inScope(rows, RECONCILED_THROUGH), mapping);
+    const [pair] = pairRows(tracked, mapping).pairs;
+    if (!pair) {
+      console.log('relink: no pair in this sample, delete path not exercised');
+    } else {
+      const scratch2 = fileURLToPath(new URL('../.scratch-cache-2', import.meta.url));
+      rmSync(scratch2, { recursive: true, force: true });
+      mkdirSync(scratch2, { recursive: true });
+      const balances = async (ids) => Object.fromEntries(
+        await Promise.all(ids.map(async (id) => [id, await api.getAccountBalance(id)])));
+
+      // The `into` leg alone first: the state after the run that carried only one side.
+      const solo = await loadRows([pair.into], mapping, api, rateLookup, opts);
+      const relink = await loadRows(rows, mapping, api, rateLookup, opts);
+      const after = await balances([trust, wise]);
+
+      assert.equal(solo.imported, 1, 'the lone leg should import as an ordinary transaction');
+      assert.equal(relink.transfersRelinked, 1,
+        'the second pass must relink the pair, not report it left unlinked');
+      const outAcct = mapping[pair.out.account];
+      const written = await api.getTransactions(outAcct, '2000-01-01', '2100-01-01');
+      const joined = written.filter((t) => String(t.imported_id).includes('+'));
+      assert.equal(joined.length, 1, 'exactly one joined transfer row');
+      assert.ok(!written.some((t) => t.imported_id === pair.into.id),
+        'the stale leg must be gone, not left beside the transfer');
+      // And the money is where it was: a relink moves a row between shapes, never between totals.
+      assert.deepEqual(after, await balances([trust, wise]), 'balances must be stable');
+      console.log(`relink: deleted the stale leg and wrote ${joined.length} transfer, balances stable`);
+    }
     assert.equal(dupes.length, 0, `re-import duplicated ${dupes.length} row(s): ${dupes.slice(0, 3)}`);
     assert.equal(all.length, first.imported, 'second pass must add nothing');
 

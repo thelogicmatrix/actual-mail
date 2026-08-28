@@ -406,7 +406,10 @@ try {
   // exit 0 and a healthy heartbeat over an empty budget. Worse on the next run: the dedupe reads
   // the LOCAL cache, which does hold the rows, so it reports them already present and the "all
   // good" signal becomes permanent. Here the failure is loud and the success line is earned.
-  if (!dryRun && imported > 0) await api.sync();
+  // `|| transfersRelinked`: a relink DELETED a row, and a deletion left unsynced sits in the
+  // local cache that the next run's dedupe reads, so the run after it reports healthy over a
+  // budget the server never saw. Same reasoning as the gate inside loadRows' catch.
+  if (!dryRun && (imported > 0 || transfersRelinked > 0)) await api.sync();
   console.error(dryRun
     ? `dry run: ${imported} row(s) would be written${tail}, nothing written`
     : `imported ${imported} row(s)${tail}`);

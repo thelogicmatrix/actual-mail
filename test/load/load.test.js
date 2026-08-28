@@ -1194,3 +1194,31 @@ test('a delete that succeeds and a write that then fails is still synced', async
   assert.deepEqual(api.deleted, ['existing-1'], 'the delete did happen');
   assert.equal(synced, 1, 'so it has to be synced, or the local cache and the server disagree');
 });
+
+test('a scheduled row is never deleted — the schedule would re-open as unpaid', async () => {
+  // Actual returns `schedule` on every row, and the worked example this whole feature is built
+  // around is "the monthly UOB-to-Trust transfer" — precisely the shape a person puts on a
+  // schedule. Deleting the transaction it satisfied makes the schedule look unpaid again, and
+  // the obvious next move is to enter it by hand.
+  const api = deletingSink(new Map([['ACCT_A', [
+    { id: 'existing-1', imported_id: 'xin', amount: 70000, date: '2026-08-27', schedule: 'sched-uuid' },
+  ]]]));
+  const r = await loadRows(PAIR_ROWS(), XFER_MAPPING, api, () => null, XOPTS);
+  assert.deepEqual(api.deleted, []);
+  assert.equal(r.transfersAlreadySeparate, 1);
+});
+
+test('a pair whose replacement write would be filtered by a legacy digest is not relinked', async () => {
+  // The worst outcome this function can produce: the delete succeeds, the replacement transfer is
+  // then dropped by the dedupe's legacy check, `imported` is zero so nothing reports it, and the
+  // money is simply gone. The guard existed but nothing pinned it, so a refactor could have
+  // removed it and the suite would have stayed green.
+  const legacyOut = rowId('trust', '<u>');   // out leg lives in `uob` -> ACCT_B, the write account
+  const api = deletingSink(new Map([
+    ['ACCT_A', [{ id: 'existing-1', imported_id: 'xin', amount: 70000, date: '2026-08-27' }]],
+    ['ACCT_B', [{ id: 'legacy-1', imported_id: legacyOut, amount: -70000, date: '2026-08-27' }]],
+  ]));
+  const r = await loadRows(PAIR_ROWS(), XFER_MAPPING, api, () => null, XOPTS);
+  assert.deepEqual(api.deleted, [], 'a delete whose replacement cannot land is money gone');
+  assert.equal(r.transfersRelinked, 0);
+});
