@@ -154,6 +154,15 @@ test('noreply addresses are allowed, lookalikes are not', () => {
   assert.equal(hits[0].rule, 'email address');
 });
 
+// The maintainer's address is public by choice, and Forgejo squash merges author with it.
+// Exactly that address: another local part at the same domain is still a leak.
+test('the maintainer address is allowed, its domain is not', () => {
+  assert.deepEqual(scanText('nathan <thelogicmatrix@gmail.com>'), []);
+  const hits = scanText('someone.else@gmail.com');
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].rule, 'email address');
+});
+
 // `^noreply@` pinned the local part and left the DOMAIN free, justified as "the local part is
 // the payload". True for an identity and false for infrastructure, which this gate says is
 // equally unpublishable — a private hostname rode out on a noreply address and published fine.

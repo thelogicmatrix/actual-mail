@@ -224,3 +224,9 @@ back-fill date.
 - `SELF_REVIEWED` (superseded versions, each read once) is still a full exemption. Those blobs are history, and history was accepted rather than rewritten — see below.
 - **The instance was accepted, the class was fixed.** Nathan's call, 2026-08-28. The string is a hostname with no address, credential or account data beside it, and the private remote it names is not reachable from outside the tailnet. Rewriting public history would force-push `github/main` and break the deploy host's `--ff-only` clone, and would not touch the private archive remote, which holds far more. Two blobs reachable from `main` still carry it.
 - Status: fixed 2026-08-28, one CLI test. `--all-revs` remains non-zero for unrelated reasons (128 findings over 594 objects, overwhelmingly synthetic test positives in superseded blobs) — reachability from `main` is the check that matters, and its recipe is in `docs/RUNBOOK.md`.
+
+## The maintainer's email is public
+
+- Forgejo's squash merge authors the commit with the Forgejo account's primary email, so PR #1 (45ef4ab) published `thelogicmatrix@gmail.com` to `github/main` and the history scan went red on it.
+- Nathan's call, 2026-09-24: the address is fine to have public. It is already on every public `lm-tools` commit. The gate allows that one address, both ends anchored, so any other address at the same domain is still a finding. The commits the history rewrite reauthored to noreply stay as they are.
+- Status: allowed 2026-09-24, one unit test.

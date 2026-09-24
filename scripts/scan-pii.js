@@ -63,6 +63,12 @@ const ALLOWED = [
   /^[\w.+-]+@example\.(?:com|org|net)$/,
   /^noreply@(?:example\.(?:com|org|net)|anthropic\.com)$/i,
   /^[\w.+-]+@users\.noreply\.github\.com$/i,
+  // The maintainer's own address, public by his choice (docs/DECISIONS.md, 2026-09-24). Forgejo's
+  // squash merge authors the commit with it, so without this every merge turns the history scan
+  // red. Both ends anchored: it waves through this one address, not the domain. The dot is left
+  // unescaped so the source spells the address plainly for the maintainer's own literal rule, and
+  // the email rule never produces a match with anything but a dot there.
+  /^thelogicmatrix@gmail.com$/i,
   // Measured cost of widening the merchant rule's country code to /[A-Z]{2}/: these twelve are
   // every false positive it produces over this tree and its whole history. All of them are
   // screaming-caps English prose whose last word happens to be two letters (IS, OF, OR, TO, IN,
@@ -236,6 +242,21 @@ const SELF_REVIEWED = new Set([
   '7c0df7db14bcbb2e547bd4c4646883c39308786f906483c2c91956761bc097d6', // ac42263 test/scan-pii.test.js
   '6e00761c5c9a6cdf6e9bdb5b344d2a8d87ecfbd69cd475c2c9b250ec071e4d0b', // b04e799 test/scan-pii.test.js
   'b862a9ba7339e32c18076bc3c4a1ab4aabbb6952f16544acfc0f7cc519866dbc', // 721219f test/scan-pii.test.js
+  // The versions reachable from the published main, reviewed 2026-09-24 (issue #2). Each one's
+  // structural hits are a subset of the 46b5f98 / 2b6b92c versions' hits, so they are the same
+  // synthetic positives, except one: the publication-era test (732d9bf, 32e1ffe) names a private host in a fixture
+  // address, and the matching gate versions (7aa6f14, 5683c47) quote it once. That is the
+  // instance docs/DECISIONS.md records as accepted rather than rewritten, and the only literal
+  // hit any of the five produce. 46b5f98 is the version this edit replaces: same hits, none extra.
+  'edbb66e0afc5362cc06f10ee99fa07033f694e819a14929e2e24b6567beb1476', // 7aa6f14 scripts/scan-pii.js
+  '4b02b74cde3c595fd03d3199dca804e7c28aa93cd4634f9a4ce51fd5e7ca2a40', // 5683c47 scripts/scan-pii.js
+  '04f0e496981f0d04436c84078df5c20eee186ce6345917fe456603a4c0e6a9a8', // 46b5f98 scripts/scan-pii.js
+  '2b57b08fb9a8e3385d3c0f29de7749725b77b0a951acbcf8ea748358918ac767', // 732d9bf test/scan-pii.test.js
+  '1389f7287f2a34ae89c1a549cd05ca5f3e72688821033940c4fea0a0271e2d3a', // 32e1ffe test/scan-pii.test.js
+  // Superseded by the maintainer-email allowance, 2026-09-24. Hits are a subset of the current
+  // versions' hits: 8 of 8 and 43 of 43, none extra.
+  'd1550736a76e98f61e6471d4a920092c57fa6ce6535e1be28d8a14f3c7e276d7', // 9fa3f63 scripts/scan-pii.js
+  '82e912b2522375be4ea8b8ec749ca0411816a1168a3ac2bd65d4fefcf9980d0c', // 2b6b92c test/scan-pii.test.js
 ]);
 
 // The working-tree copy is the version under review, so it is exempt without being listed —
