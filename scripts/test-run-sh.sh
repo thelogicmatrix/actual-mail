@@ -325,6 +325,8 @@ check "an unparsed-mail failure is named as one" "1" \
 run ACTUAL_MAIL_SWEEP=1 FAKE_EXTRACT_RC=1 FAKE_SOURCE_FAILED=wise
 check "an unreachable source is named as one, and says which source" "1" \
       "$(tail -1 "$T/home/runs/run.log" | grep -c 'reason=\[extract: SOURCE FAILED wise;matched no parser\]')"
+check "and keeps what the source said, which reason= drops" "1" \
+      "$(tail -1 "$T/home/runs/run.log" | grep -c 'detail=\[wise: getaddrinfo EAI_AGAIN somewhere\]')"
 
 run ACTUAL_MAIL_SWEEP=1 FAKE_LOAD_RC=5
 check "a load failure names the stage it failed at" "1" \

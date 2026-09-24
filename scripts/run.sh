@@ -141,10 +141,11 @@ ERR="$(mktemp)"
 # hand could be told apart afterwards. A DNS blip and a bank redesigning its emails are the
 # same line in this log, and they want opposite responses.
 log_run() {
-  printf '%s mode=%s window=%sd extract=%s load=%s%s%s\n' \
+  printf '%s mode=%s window=%sd extract=%s load=%s%s%s%s\n' \
     "$(date -Is)" "$([ "$SWEEP" = "1" ] && echo sweep || echo hourly)" \
     "$WINDOW_DAYS" "${EXTRACT_RC:-aborted}" "${LOAD_RC:-n/a}" \
-    "${COUNTS:+ counts=[$COUNTS]}" "${REASON:+ reason=[$REASON]}" >>"$RUNS/run.log"
+    "${COUNTS:+ counts=[$COUNTS]}" "${REASON:+ reason=[$REASON]}" \
+    "${DETAIL:+ detail=[$DETAIL]}" >>"$RUNS/run.log"
   # Beat only on a run that actually worked. An aborted start (missing .env, quoted value)
   # leaves EXTRACT_RC unset and must read as down, not as silence — the monitor turning red
   # is the visible half of the same signal the watchdog raises on the webhook.
@@ -172,6 +173,7 @@ log_run() {
 }
 COUNTS=""
 REASON=""
+DETAIL=""
 STREAK_NOTE=""
 SWEEP_EMPTY=0
 DRY_RUN_HELD=0
@@ -206,6 +208,15 @@ SOURCE_FAIL_WINDOW=6
 # The fallback skips the counting lines, the same ones alert()'s fingerprint strips and for the
 # same reason: "9 row(s), 0 ignored" is the FIRST line of every real stderr, it changes whenever
 # the feed is busy, and it names no fault at all. A naive `head -1` records exactly that.
+# fail_detail <errfile>: what each failed source said, after `SOURCE FAILED <id>: `, for run.log's
+# `detail=` field. `reason=` stays the class that RUNBOOK greps. The detail is what tells a 403
+# from a DNS blip, and it used to live only in the alert body, so a quiet-gated failure left
+# nothing behind at all (Wise, 2026-09-21..23: eight failures, no cause on record).
+fail_detail() {
+  grep -oE 'SOURCE FAILED [a-z0-9-]+: .*' "$1" 2>/dev/null | sed 's/^SOURCE FAILED //' \
+    | LC_ALL=C sort -u | tr '\n' ';' | sed 's/;$//' | tr -d ',[]' | tr -s ' ' | cut -c1-200
+}
+
 fail_reason() {   # fail_reason <errfile>
   local r
   # `[a-z0-9-]+` not `[a-z]+`: parser ids are hyphenated since the registry landed, and the old
@@ -471,6 +482,7 @@ if [ $EXTRACT_RC -ne 0 ]; then
   # Captured here, where $ERR still holds Part 1's stderr. Part 2 reuses the same file, so by
   # the time the exit trap runs the reason is gone — which is precisely how it went unrecorded.
   REASON="extract: $(fail_reason "$ERR")"
+  DETAIL="$(fail_detail "$ERR")"
   # `reason=` records the CLASS of fault, and deliberately so: it is one field on a one-line
   # record, stripped of commas and cut at 120 chars. For a bank redesign that class is the
   # constant string `matched no parser`, so the only question a recurrence asks -- WHICH message --
