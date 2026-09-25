@@ -109,6 +109,11 @@ back-fill date.
 - Why shared, not two policies: in each of the three runs the *other* source resolved fine, and the loader's container-DNS calls never failed at all. The fault is the resolver, not either service — fixing it in `wise.js` alone would have left `imap.js` falling over on the identical blip. One policy, two call sites.
 - Why not fix DNS: the deployment host resolves via its router directly, and every candidate cause upstream of that was ruled out by measurement rather than by argument. Host DNS had already been exonerated on 07-29 (0 failures in 60 attempts), no filtering layer's rate limit sits in the path, and an encrypted-DNS proxy had been tried and reverted a month earlier for breaking an unrelated service. Three blips in 36 hours, each hitting one host while the other resolved, with a daily sweep behind it. Riding them out is the proportionate fix.
 - Alternatives rejected: retrying inside the message iteration (would re-yield messages the caller already consumed — only `connect()` is retried, and a fresh `ImapFlow` is built per attempt because a failed instance is spent); retrying any IMAP error (four tries at a wrong password is how a mailbox gets locked, so IMAP is code-gated even though Wise is not); jitter (one process, one query at a time, no herd to spread).
+- Status: active, window widened to 6 attempts on 2026-09-25 (next entry)
+
+### 2026-09-25 · The retry window is 31s, not 7s · owner: Claude
+- Decision: `ATTEMPTS` 4 -> 6, so the doubling delays run 1s/2s/4s/8s/16s, 31s in all.
+- Why: the trigger the 08-03 comment named ("blips outliving ~7s") fired. With `detail=` in `run.log` since 09-24, the 2026-09-25 08:15 and 09:15 runs both read `Wise unreachable after 4 attempts on /v1/profiles: fetch failed (EAI_AGAIN)`, while IMAP resolved in the same runs. Same resolver-blip class as August, just longer.
 - Status: active
 
 ### 2026-08-03 · The repo gets a remote, and the host clones it · owner: Nathan

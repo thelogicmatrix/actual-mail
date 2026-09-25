@@ -81,7 +81,7 @@ function stubFetch(handler) {
   return () => { globalThis.fetch = real; };
 }
 
-// The retry window is 1s + 2s + 4s of real sleeping, and a suite that takes seven seconds to
+// The retry window is 31s of real sleeping (1s doubling to 16s), and a suite that takes that long to
 // prove a loop counts is a suite that stops being run. The backoff arithmetic itself is
 // asserted in retry.test.js; here only the attempt counts matter.
 function stubSleep() {
@@ -118,7 +118,7 @@ test('retries are bounded — a real outage still fails, naming the cause', asyn
       /unreachable after \d+ attempts/,
       'the raw undici stack is unreadable in a Discord alert; the message has to say what broke',
     );
-    assert.ok(attempts <= 5, `bounded, not a hang: ${attempts} attempts`);
+    assert.equal(attempts, 6, `bounded, not a hang: ${attempts} attempts`);
   } finally { restore(); unsleep(); }
 });
 

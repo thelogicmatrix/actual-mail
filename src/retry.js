@@ -17,15 +17,19 @@
 // outright. Fixing it in one source would have left the other falling over on the same blip,
 // so the policy lives here and both call sites use it.
 //
-// ponytail: fixed 1s/2s/4s, no jitter — one process making one query at a time has no
-// thundering herd to spread out. Raise ATTEMPTS if run.log shows blips outliving ~7s.
-export const ATTEMPTS = 4;
+// That trigger fired on 2026-09-25: the 08:15 and 09:15 runs both logged `Wise unreachable
+// after 4 attempts on /v1/profiles: fetch failed (EAI_AGAIN)`, so the blip outlived the 7s
+// window of 1s/2s/4s while IMAP resolved fine in the same runs. Six attempts wait 31s in all.
+//
+// ponytail: fixed doubling from 1s, no jitter. One process making one query at a time has no
+// thundering herd to spread out. Raise ATTEMPTS again if run.log shows blips outliving ~31s.
+export const ATTEMPTS = 6;
 const BASE_MS = 1000;
 
 // Retrying a wrong password four times is how an IMAP account gets locked, so only a
 // transport-level fault counts as transient. ENOTFOUND is in the list: these hostnames come
 // from config and do not move, so an NXDOMAIN for imap.gmail.com is the resolver failing
-// rather than a typo — and a genuine typo is still reported, just seven seconds later.
+// rather than a typo, and a genuine typo is still reported, just 31 seconds later.
 const TRANSIENT = /\b(EAI_AGAIN|ENOTFOUND|ETIMEDOUT|ECONNRESET|UND_ERR_CONNECT_TIMEOUT|UND_ERR_HEADERS_TIMEOUT|UND_ERR_SOCKET)\b/;
 
 // The code can arrive on the error, on its cause (undici buries a SystemError inside

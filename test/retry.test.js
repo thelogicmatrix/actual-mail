@@ -57,5 +57,5 @@ test('the delay grows per attempt — three 1s tries did not outlast the 2026-08
   try {
     await assert.rejects(() => retry(async () => { throw messageOnly(); }), /EAI_AGAIN/);
   } finally { globalThis.setTimeout = sleep; }
-  assert.deepEqual(waited, [1000, 2000, 4000], 'the window has to widen, not repeat');
+  assert.deepEqual(waited, [1000, 2000, 4000, 8000, 16000], 'the window has to widen, not repeat');
 });
