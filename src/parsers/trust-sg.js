@@ -74,6 +74,10 @@ const PARSERS = [
   transferLike(
     String.raw`A local transfer of ${AMT} from A/C ending (\d{4}) to (.+?) on ${WHEN} is successful`,
     'transfer_out', true),
+  // Bill-payment wording, first seen 2026-10-30 on a payment to an insurer.
+  transferLike(
+    String.raw`Your transaction of ${AMT} from A/C ending (\d{4}) to (.+?) on ${WHEN} is successful`,
+    'transfer_out', true),
   // Pot transfers run both ways. Both rows are written from the bank account's point of
   // view — account is always the A/C, payee is always the pot — so the pair nets to zero.
   transferLike(

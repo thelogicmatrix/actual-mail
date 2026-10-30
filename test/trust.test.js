@@ -75,6 +75,15 @@ test('local transfer out is negative and keeps source and destination distinct',
   assert.equal(row.payee, 'TEST BANK A/C ending 0000');
 });
 
+test('bill payment ("Your transaction of") is a negative transfer out', () => {
+  const row = parseTrust(fixture('bill-out'), '<r8b>', 'Yay! Transaction successful 😀');
+  assert.equal(row.type, 'transfer_out');
+  assert.equal(row.account, '0000');
+  assert.equal(row.amount, '-45.67');
+  assert.equal(row.payee, 'TEST BILLER LIMITED TRUST-TESTREF');
+  assert.equal(row.date, '2026-10-30T00:48:00+08:00');
+});
+
 test('pot transfer parses the S$ rendering', () => {
   const row = parseTrust(fixture('pot-transfer'), '<r9>', 'Yay! Your Savings Pot transfer is successful');
   assert.equal(row.type, 'pot_transfer');
